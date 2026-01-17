@@ -488,14 +488,14 @@ def create_gui() -> gr.Blocks:
                     *Tools are initialized automatically when you send a message with "Enable Tools" checked.*
                     """)
                 
-                with gr.Accordion("Agent Settings", open=False):
+                with gr.Accordion("Agent Settings", open=True):
                     max_iterations_slider = gr.Slider(
                         label="Max Iterations (for complex tasks)",
                         minimum=1,
-                        maximum=10,
-                        value=5,
+                        maximum=30,
+                        value=15,
                         step=1,
-                        info="How many think→tool→think cycles for complex tasks"
+                        info="How many think→tool→think cycles (more = deeper research)"
                     )
                 
                 with gr.Accordion("System Prompt", open=False):
@@ -523,7 +523,7 @@ For complex tasks, break them into steps and use tools multiple times as needed.
                 gr.Markdown("### 💬 Conversation")
                 
                 # Default prompt
-                default_prompt = "Find a current business niche based on trends and demands from reddit analysis with low competition and entry costs, high demand and bill. Validate it, analyse competitions and build MVP code"
+                default_prompt = "Find a current business niche based on trends and demands from trend analysis with low competition and entry costs, high demand and bill. Validate it, analyse competitions and build MVP code"
                 
                 # Input area
                 with gr.Row():
@@ -575,6 +575,7 @@ For complex tasks, break them into steps and use tools multiple times as needed.
             agent.reset_conversation()
             # Reset the client so new settings take effect
             agent.current_client = None
+            agent.tool_handler = None
             return (
                 default_prompt,  # Reset to default prompt
                 "*Click Send to start processing...*",
