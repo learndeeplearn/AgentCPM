@@ -14,6 +14,7 @@ import asyncio
 import json
 import logging
 import io
+import re
 from pathlib import Path
 from datetime import datetime
 from typing import List, Dict, Any, Optional, Generator
@@ -42,6 +43,36 @@ logging.basicConfig(
     handlers=[logging.StreamHandler(), log_handler]
 )
 logger = logging.getLogger("gui_app")
+
+
+def extract_thinking_from_response(response_text: str) -> tuple:
+    """
+    Extract thinking/reasoning content from response text.
+    DeepSeek models often include <think>...</think> tags.
+    
+    Returns: (thinking_content, cleaned_response)
+    """
+    if not response_text:
+        return "", ""
+    
+    thinking = ""
+    cleaned = response_text
+    
+    # Pattern 1: <think>...</think> tags
+    think_pattern = re.compile(r'<think>(.*?)</think>', re.DOTALL | re.IGNORECASE)
+    match = think_pattern.search(response_text)
+    if match:
+        thinking = match.group(1).strip()
+        cleaned = response_text.replace(match.group(0), "").strip()
+    
+    # Pattern 2: **Thinking:** or **Reasoning:** sections
+    if not thinking:
+        section_pattern = re.compile(r'\*\*(Thinking|Reasoning|Analysis):\*\*\s*(.*?)(?=\*\*(?:Answer|Response|Result|Conclusion):\*\*|$)', re.DOTALL | re.IGNORECASE)
+        match = section_pattern.search(response_text)
+        if match:
+            thinking = match.group(2).strip()
+    
+    return thinking, cleaned
 
 
 def get_logs():
@@ -133,7 +164,7 @@ class AgentGUI:
         output_parts = []
         logs_accumulated = []
         
-        def build_output(input_text="", thinking_text="", tool_calls_text="", response_text="", error_text=""):
+        def build_output(input_text="", thinking_text="", tool_calls_text="", response_text="", logs_text=""):
             """Build combined output from all sections."""
             sections = []
             
@@ -149,8 +180,8 @@ class AgentGUI:
             if response_text:
                 sections.append(f"### 💬 FINAL RESPONSE\n\n{response_text}")
             
-            if error_text:
-                sections.append(f"### ❌ ERRORS/LOGS\n\n```\n{error_text}\n```")
+            if logs_text:
+                sections.append(f"### 📋 LOGS\n\n```\n{logs_text}\n```")
             
             return "\n\n---\n\n".join(sections)
         
@@ -165,7 +196,7 @@ class AgentGUI:
         thinking_text = ""
         tool_calls_text = ""
         response_text = ""
-        error_text = ""
+        logs_text = ""
         
         # Step 1: Input received
         yield (build_output(input_text=input_text), "🔄 Processing input...")
@@ -173,12 +204,12 @@ class AgentGUI:
         # Initialize client if needed
         if not self.current_client:
             init_result = self.initialize_client(model, base_url)
-            error_text = collect_logs()
+            logs_text = collect_logs()
             if "❌" in init_result:
-                error_text += f"\n{init_result}"
-                yield (build_output(input_text=input_text, error_text=error_text), init_result)
+                logs_text += f"\n{init_result}"
+                yield (build_output(input_text=input_text, logs_text=logs_text), init_result)
                 return
-            yield (build_output(input_text=input_text, error_text=error_text), "🔄 Client initialized...")
+            yield (build_output(input_text=input_text, logs_text=logs_text), "🔄 Client initialized...")
         
         # Build messages
         messages = []
@@ -211,12 +242,22 @@ class AgentGUI:
                 max_tokens=max_tokens if max_tokens > 0 else None
             )
             
-            error_text = collect_logs()
+            logs_text = collect_logs()
             
-            # Process thinking/reasoning
-            if result.get("thought"):
-                thinking_text = result["thought"]
-                yield (build_output(input_text=input_text, thinking_text=thinking_text, error_text=error_text), 
+            # Process thinking/reasoning - check multiple sources
+            thinking_text = result.get("thought", "")
+            raw_response = result.get("response", "")
+            
+            # If no explicit thought, try to extract from response
+            if not thinking_text and raw_response:
+                extracted_thinking, cleaned_response = extract_thinking_from_response(raw_response)
+                if extracted_thinking:
+                    thinking_text = extracted_thinking
+                    # Update response to cleaned version
+                    result["response"] = cleaned_response
+            
+            if thinking_text:
+                yield (build_output(input_text=input_text, thinking_text=thinking_text, logs_text=logs_text), 
                        "🧠 Reasoning complete...")
             
             # Process tool calls
@@ -248,19 +289,19 @@ class AgentGUI:
                             tool_entries.append(f"**Error:** {str(e)}")
                 
                 tool_calls_text = "\n\n".join(tool_entries)
-                error_text = collect_logs()
+                logs_text = collect_logs()
                 yield (build_output(input_text=input_text, thinking_text=thinking_text, 
-                                   tool_calls_text=tool_calls_text, error_text=error_text),
+                                   tool_calls_text=tool_calls_text, logs_text=logs_text),
                        "🔧 Tool calls processed")
             
             # Process final response
             response_text = result.get("response", "")
-            error_text = collect_logs()
+            logs_text = collect_logs()
             
             if response_text:
                 yield (build_output(input_text=input_text, thinking_text=thinking_text,
                                    tool_calls_text=tool_calls_text, response_text=response_text,
-                                   error_text=error_text),
+                                   logs_text=logs_text),
                        "✅ Response complete")
             
             # Update conversation history
@@ -278,15 +319,15 @@ class AgentGUI:
                 status += f" | Tokens: {usage}"
             yield (build_output(input_text=input_text, thinking_text=thinking_text,
                                tool_calls_text=tool_calls_text, response_text=response_text,
-                               error_text=error_text), status)
+                               logs_text=logs_text), status)
             
         except Exception as e:
             error_msg = f"Error during LLM call: {str(e)}"
             logger.error(error_msg, exc_info=True)
-            error_text = collect_logs()
-            error_text += f"\n\n**Exception:** {error_msg}"
+            logs_text = collect_logs()
+            logs_text += f"\n\n**Exception:** {error_msg}"
             yield (build_output(input_text=input_text, thinking_text=thinking_text,
-                               tool_calls_text=tool_calls_text, error_text=error_text),
+                               tool_calls_text=tool_calls_text, logs_text=logs_text),
                    f"❌ {error_msg[:100]}")
 
 
@@ -311,12 +352,12 @@ def create_gui() -> gr.Blocks:
                 with gr.Accordion("Model Settings", open=True):
                     model_input = gr.Textbox(
                         label="Model Name",
-                        value="gpt-4o-mini",
+                        value="deepseek-r1:1.5b",
                         placeholder="e.g., gpt-4o-mini, deepseek-r1:1.5b"
                     )
                     base_url_input = gr.Textbox(
                         label="Base URL",
-                        value="",
+                        value="http://localhost:11434/v1",
                         placeholder="Leave empty for OpenAI, or http://localhost:11434/v1 for Ollama"
                     )
                 
@@ -336,7 +377,7 @@ def create_gui() -> gr.Blocks:
                         step=256
                     )
                 
-                with gr.Accordion("MCP Tools Settings", open=False):
+                with gr.Accordion("MCP Tools Settings", open=True):
                     manager_url_input = gr.Textbox(
                         label="MCP Manager URL",
                         value="http://localhost:8000/mcpapi",
@@ -344,7 +385,7 @@ def create_gui() -> gr.Blocks:
                     )
                     use_tools_checkbox = gr.Checkbox(
                         label="Enable MCP Tools",
-                        value=False
+                        value=True
                     )
                     init_mcp_btn = gr.Button("🔌 Initialize MCP", variant="secondary")
                     mcp_status = gr.Textbox(
@@ -352,6 +393,13 @@ def create_gui() -> gr.Blocks:
                         value="Not initialized",
                         interactive=False
                     )
+                    gr.Markdown("""
+                    **Available MCP Tools** (when connected):
+                    - 🔍 Search (web search via multiple engines)
+                    - 🌐 Browse (web page content extraction)
+                    - 📄 Read File (enhanced file reading)
+                    - And more depending on MCP server configuration
+                    """)
                 
                 with gr.Accordion("System Prompt", open=False):
                     system_prompt_input = gr.Textbox(
