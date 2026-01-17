@@ -26,9 +26,7 @@ project_root = script_dir.parent
 sys.path.insert(0, str(project_root))
 sys.path.insert(0, str(script_dir))
 
-from extended_openai_client import (
-    get_extended_llm_client, LLMClientManager
-)
+from ollama_client import OllamaClient, create_ollama_client
 from simple_tools import SimpleToolHandler, SIMPLE_TOOLS
 
 # Configure logging to capture logs for GUI display
@@ -86,34 +84,36 @@ def get_logs():
 
 
 class AgentGUI:
-    """GUI wrapper for AgentCPM-MCP interactions."""
+    """GUI wrapper for AgentCPM interactions with Ollama."""
     
     def __init__(self):
-        self.client_manager = LLMClientManager()
-        self.tool_handler = None  # Can be SimpleToolHandler or MCPHandler
-        self.current_client = None
+        self.tool_handler = None  # SimpleToolHandler
+        self.current_client = None  # OllamaClient
         self.conversation_history = []
         self.step_counter = 0
+        self._client_config = {}  # Store config to detect changes
         
     def initialize_client(
         self,
         model: str,
         base_url: str,
-        api_key: str = None
+        api_key: str = None  # Not used for Ollama, kept for compatibility
     ) -> str:
-        """Initialize or reinitialize the LLM client."""
+        """Initialize or reinitialize the Ollama client."""
         try:
-            # Always use openai provider (works with Ollama's OpenAI-compatible API)
-            client_name = f"openai_{model}"
-            self.current_client = self.client_manager.create_client(
-                client_name=client_name,
-                provider="openai",
+            # Check if we need to reinitialize
+            new_config = {"model": model, "base_url": base_url}
+            if self.current_client and self._client_config == new_config:
+                return f"✅ Client already initialized: {model}"
+            
+            # Create new Ollama client (no openai dependency!)
+            self.current_client = create_ollama_client(
                 model=model,
-                api_key=api_key if api_key else None,
-                base_url=base_url if base_url else None,
-                timeout=1800.0
+                base_url=base_url if base_url else "http://localhost:11434",
+                timeout=600.0
             )
-            return f"✅ Client initialized: {model} @ {base_url or 'default'}"
+            self._client_config = new_config
+            return f"✅ Client initialized: {model} @ {base_url or 'http://localhost:11434'}"
         except Exception as e:
             return f"❌ Failed to initialize client: {str(e)}"
 
