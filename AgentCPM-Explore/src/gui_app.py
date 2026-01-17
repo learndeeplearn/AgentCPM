@@ -386,8 +386,39 @@ class AgentGUI:
                     # Continue to next iteration to process tool results
                     continue
                 
-                # No tool calls - this is the final response
-                final_response = result.get("response", "")
+                # No tool calls detected - check if model is describing tool usage instead of calling
+                response_text = result.get("response", "")
+                
+                # Detect if model is describing tool usage without actually calling
+                describes_tools = any(phrase in response_text.lower() for phrase in [
+                    "use web_search", "use fetch_webpage", "call web_search", "call fetch_webpage",
+                    "using web_search", "using fetch_webpage", "i would search", "i will search",
+                    "search for", "let me search", "we can search"
+                ])
+                
+                if describes_tools and iteration < max_iterations and use_tools:
+                    # Model is describing but not calling - prompt it to actually call
+                    all_thinking.append(f"**Iteration {iteration} (no tool call detected):**\n{response_text[:500]}...")
+                    
+                    messages.append({"role": "assistant", "content": response_text})
+                    messages.append({
+                        "role": "user",
+                        "content": """You described using tools but didn't actually call them.
+
+To ACTUALLY use a tool, you must output ONLY this JSON format:
+{"name": "web_search", "arguments": {"query": "your search query"}}
+
+Please call the web_search tool now with a specific search query. Output ONLY the JSON, nothing else."""
+                    })
+                    
+                    current_status = f"🔄 Iteration {iteration}: Model described tools but didn't call - prompting to actually use"
+                    yield (build_output(input_text=input_text, thinking_text="\n\n".join(all_thinking),
+                                       tool_calls_text="\n\n---\n\n".join(all_tool_calls),
+                                       logs_text=logs_text, status_text=current_status), current_status)
+                    continue
+                
+                # This is truly the final response
+                final_response = response_text
                 
                 # Update conversation history
                 self.conversation_history.append({"role": "user", "content": prompt})
@@ -501,20 +532,24 @@ def create_gui() -> gr.Blocks:
                 with gr.Accordion("System Prompt", open=False):
                     system_prompt_input = gr.Textbox(
                         label="System Prompt",
-                        value="""You are a helpful AI assistant that thinks step-by-step and can use tools.
+                        value="""You are an AI research agent. You MUST use tools to gather real information - do NOT make up answers.
 
-When you need information from the internet, use the available tools:
-- web_search: Search the web for information
-- fetch_webpage: Read content from a specific URL
+IMPORTANT: For any research task, you MUST call tools. Do NOT just describe what you would do.
 
-To use a tool, output JSON in this exact format:
-{"name": "web_search", "arguments": {"query": "your search query"}}
-or
-{"name": "fetch_webpage", "arguments": {"url": "https://example.com"}}
+Available tools:
+1. web_search - Search the internet
+2. fetch_webpage - Read a webpage
 
-After receiving tool results, analyze them and continue your reasoning.
-For complex tasks, break them into steps and use tools multiple times as needed.""",
-                        lines=6,
+TO CALL A TOOL, output this EXACT JSON format (nothing else):
+{"name": "web_search", "arguments": {"query": "your search query here"}}
+
+Example - if asked about business trends, your FIRST response should be:
+{"name": "web_search", "arguments": {"query": "business trends 2024 low competition high demand"}}
+
+After receiving results, analyze them, then call another tool if needed.
+Keep using tools until you have gathered enough real data to answer.
+Only provide your final answer AFTER using tools to research.""",
+                        lines=8,
                         placeholder="Enter system prompt..."
                     )
             

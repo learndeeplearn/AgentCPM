@@ -166,14 +166,15 @@ class OllamaClient:
                     system_msg = msg
                     break
             
-            tool_prompt = f"""You have access to the following tools:
+            tool_prompt = f"""TOOLS AVAILABLE - YOU MUST USE THEM:
 
 {tool_descriptions}
 
-To use a tool, respond with a JSON object in this format:
-{{"name": "tool_name", "arguments": {{"arg1": "value1"}}}}
+CRITICAL: To use a tool, output ONLY this JSON (no other text):
+{{"name": "web_search", "arguments": {{"query": "your search"}}}}
 
-Only use tools when necessary. After using a tool, wait for the result before continuing."""
+DO NOT describe using tools. Actually OUTPUT the JSON to call them.
+After getting results, analyze them and call more tools if needed."""
 
             if system_msg:
                 system_msg["content"] = tool_prompt + "\n\n" + system_msg["content"]
