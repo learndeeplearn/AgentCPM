@@ -425,16 +425,11 @@ class LLMClientManager:
         return self._clients.get(client_name)
 
 
-# Model configuration constants for Ollama local deployment
-MODEL_NAME = "deepseek-r1-1.5b"
-BASE_URL = "http://localhost:11434/v1"
-
-
 def get_extended_llm_client(
     provider: str = "openai",
-    model: str = MODEL_NAME,
+    model: str = "gpt-4o-mini",
     api_key: Optional[str] = None,
-    base_url: Optional[str] = BASE_URL,
+    base_url: Optional[str] = None,
     timeout: float = 1800.0,
     tool_start_tag: Optional[str] = None,
     tool_end_tag: Optional[str] = None
@@ -442,13 +437,11 @@ def get_extended_llm_client(
     """
     Factory function to create an LLM client instance.
     
-    Defaults to using a local deepseek model via Ollama.
-    
     Args:
         provider: LLM provider ("openai" or "ollama")
-        model: Model name (default: deepseek-r1-1.5b)
+        model: Model name (default: gpt-4o-mini)
         api_key: API key (not required for Ollama)
-        base_url: API base URL (default: Ollama localhost)
+        base_url: API base URL (default: OpenAI, or http://localhost:11434/v1 for Ollama)
         timeout: Request timeout in seconds
         tool_start_tag: Tag to identify start of tool calls in response
         tool_end_tag: Tag to identify end of tool calls in response

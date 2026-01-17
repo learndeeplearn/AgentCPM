@@ -13,6 +13,7 @@ import sys
 import asyncio
 import json
 import logging
+import io
 from pathlib import Path
 from datetime import datetime
 from typing import List, Dict, Any, Optional, Generator
@@ -25,16 +26,31 @@ sys.path.insert(0, str(project_root))
 sys.path.insert(0, str(script_dir))
 
 from extended_openai_client import (
-    MODEL_NAME, BASE_URL, get_extended_llm_client, LLMClientManager
+    get_extended_llm_client, LLMClientManager
 )
 
-# Configure logging
+# Configure logging to capture logs for GUI display
+log_buffer = io.StringIO()
+log_handler = logging.StreamHandler(log_buffer)
+log_handler.setFormatter(logging.Formatter("%(asctime)s | %(levelname)-8s | %(name)s | %(message)s", "%H:%M:%S"))
+
+# Configure root logger
 logging.basicConfig(
     level=logging.INFO,
     format="%(asctime)s | %(levelname)-8s | %(name)s | %(message)s",
-    datefmt="%Y-%m-%d %H:%M:%S"
+    datefmt="%Y-%m-%d %H:%M:%S",
+    handlers=[logging.StreamHandler(), log_handler]
 )
 logger = logging.getLogger("gui_app")
+
+
+def get_logs():
+    """Get accumulated logs from buffer."""
+    log_buffer.seek(0)
+    logs = log_buffer.read()
+    log_buffer.seek(0)
+    log_buffer.truncate(0)
+    return logs
 
 
 class AgentGUI:
@@ -51,15 +67,15 @@ class AgentGUI:
         self,
         model: str,
         base_url: str,
-        api_key: str,
-        provider: str = "openai"
+        api_key: str = None
     ) -> str:
         """Initialize or reinitialize the LLM client."""
         try:
-            client_name = f"{provider}_{model}"
+            # Always use openai provider (works with Ollama's OpenAI-compatible API)
+            client_name = f"openai_{model}"
             self.current_client = self.client_manager.create_client(
                 client_name=client_name,
-                provider=provider,
+                provider="openai",
                 model=model,
                 api_key=api_key if api_key else None,
                 base_url=base_url if base_url else None,
@@ -89,33 +105,19 @@ class AgentGUI:
         """Reset conversation history."""
         self.conversation_history = []
         self.step_counter = 0
-        return "", [], "Conversation reset."
+        return "", "Conversation reset."
 
-    def format_step(self, step_type: str, content: str, step_num: int = None) -> str:
-        """Format a step for display."""
-        if step_num is None:
-            step_num = self.step_counter
-            self.step_counter += 1
-        
-        icons = {
-            "input": "📝",
-            "thinking": "🧠",
-            "tool_call": "🔧",
-            "tool_result": "📊",
-            "response": "💬",
-            "error": "❌",
-            "info": "ℹ️"
-        }
-        icon = icons.get(step_type, "•")
-        
-        return f"\n### {icon} Step {step_num}: {step_type.upper()}\n\n{content}\n"
+    def format_section(self, title: str, content: str, icon: str = "") -> str:
+        """Format a section for display."""
+        if not content or content.strip() == "":
+            return ""
+        return f"\n\n---\n### {icon} {title}\n\n{content}\n"
 
     def process_prompt(
         self,
         prompt: str,
         model: str,
         base_url: str,
-        api_key: str,
         temperature: float,
         max_tokens: int,
         system_prompt: str,
@@ -125,36 +127,58 @@ class AgentGUI:
         """
         Process a user prompt and yield step-by-step updates.
         
-        Yields tuples of (steps_display, thinking_display, response_display, tool_calls_display, status)
+        Yields tuples of (combined_output, status)
         """
         self.step_counter = 1
-        steps_log = []
-        thinking_content = ""
-        response_content = ""
-        tool_calls_log = []
+        output_parts = []
+        logs_accumulated = []
         
-        def add_step(step_type: str, content: str):
-            formatted = self.format_step(step_type, content, self.step_counter)
-            steps_log.append(formatted)
-            self.step_counter += 1
-            return "\n".join(steps_log)
+        def build_output(input_text="", thinking_text="", tool_calls_text="", response_text="", error_text=""):
+            """Build combined output from all sections."""
+            sections = []
+            
+            if input_text:
+                sections.append(f"### 📝 INPUT\n\n{input_text}")
+            
+            if thinking_text:
+                sections.append(f"### 🧠 THINKING/REASONING\n\n{thinking_text}")
+            
+            if tool_calls_text:
+                sections.append(f"### 🔧 TOOL CALLS\n\n{tool_calls_text}")
+            
+            if response_text:
+                sections.append(f"### 💬 FINAL RESPONSE\n\n{response_text}")
+            
+            if error_text:
+                sections.append(f"### ❌ ERRORS/LOGS\n\n```\n{error_text}\n```")
+            
+            return "\n\n---\n\n".join(sections)
+        
+        # Collect logs
+        def collect_logs():
+            logs = get_logs()
+            if logs:
+                logs_accumulated.append(logs)
+            return "\n".join(logs_accumulated)
+        
+        input_text = f"**User Prompt:**\n```\n{prompt}\n```"
+        thinking_text = ""
+        tool_calls_text = ""
+        response_text = ""
+        error_text = ""
         
         # Step 1: Input received
-        steps_display = add_step("input", f"**User Prompt:**\n```\n{prompt}\n```")
-        yield (steps_display, thinking_content, response_content, 
-               "\n".join(tool_calls_log), "🔄 Processing input...")
+        yield (build_output(input_text=input_text), "🔄 Processing input...")
         
         # Initialize client if needed
         if not self.current_client:
-            init_result = self.initialize_client(model, base_url, api_key)
+            init_result = self.initialize_client(model, base_url)
+            error_text = collect_logs()
             if "❌" in init_result:
-                steps_display = add_step("error", init_result)
-                yield (steps_display, thinking_content, response_content,
-                       "\n".join(tool_calls_log), init_result)
+                error_text += f"\n{init_result}"
+                yield (build_output(input_text=input_text, error_text=error_text), init_result)
                 return
-            steps_display = add_step("info", init_result)
-            yield (steps_display, thinking_content, response_content,
-                   "\n".join(tool_calls_log), "🔄 Client initialized...")
+            yield (build_output(input_text=input_text, error_text=error_text), "🔄 Client initialized...")
         
         # Build messages
         messages = []
@@ -167,17 +191,15 @@ class AgentGUI:
         # Add current user message
         messages.append({"role": "user", "content": prompt})
         
-        steps_display = add_step("info", f"**Messages prepared:** {len(messages)} messages in context")
-        yield (steps_display, thinking_content, response_content,
-               "\n".join(tool_calls_log), "🔄 Calling LLM...")
+        input_text += f"\n\n**Context:** {len(messages)} messages in conversation"
+        yield (build_output(input_text=input_text), "🔄 Calling LLM...")
         
         # Get tools if enabled
         tools = None
         if use_tools and self.mcp_handler:
             tools = self.mcp_handler.openai_tools
-            steps_display = add_step("info", f"**Tools available:** {len(tools)} tools loaded")
-            yield (steps_display, thinking_content, response_content,
-                   "\n".join(tool_calls_log), "🔄 Tools loaded...")
+            input_text += f"\n**Tools:** {len(tools)} tools available"
+            yield (build_output(input_text=input_text), "🔄 Tools loaded...")
         
         # Call LLM
         try:
@@ -189,24 +211,23 @@ class AgentGUI:
                 max_tokens=max_tokens if max_tokens > 0 else None
             )
             
+            error_text = collect_logs()
+            
             # Process thinking/reasoning
             if result.get("thought"):
-                thinking_content = result["thought"]
-                steps_display = add_step("thinking", f"```\n{thinking_content}\n```")
-                yield (steps_display, thinking_content, response_content,
-                       "\n".join(tool_calls_log), "🧠 Reasoning complete...")
+                thinking_text = result["thought"]
+                yield (build_output(input_text=input_text, thinking_text=thinking_text, error_text=error_text), 
+                       "🧠 Reasoning complete...")
             
             # Process tool calls
             if result.get("tool_calls"):
+                tool_entries = []
                 for i, tool_call in enumerate(result["tool_calls"]):
                     func_name = tool_call.get("function", {}).get("name", "unknown")
                     func_args = tool_call.get("function", {}).get("arguments", "{}")
                     
-                    tool_info = f"**Tool:** `{func_name}`\n**Arguments:**\n```json\n{func_args}\n```"
-                    tool_calls_log.append(f"### Tool Call {i+1}\n{tool_info}")
-                    steps_display = add_step("tool_call", tool_info)
-                    yield (steps_display, thinking_content, response_content,
-                           "\n".join(tool_calls_log), f"🔧 Tool call: {func_name}")
+                    tool_entry = f"**Tool {i+1}:** `{func_name}`\n**Arguments:**\n```json\n{func_args}\n```"
+                    tool_entries.append(tool_entry)
                     
                     # Execute tool call if MCP handler available
                     if self.mcp_handler:
@@ -222,72 +243,51 @@ class AgentGUI:
                             if len(result_str) > 1000:
                                 result_str = result_str[:1000] + "\n... (truncated)"
                             
-                            tool_calls_log.append(f"**Result:**\n```json\n{result_str}\n```")
-                            steps_display = add_step("tool_result", f"```json\n{result_str}\n```")
-                            yield (steps_display, thinking_content, response_content,
-                                   "\n".join(tool_calls_log), f"📊 Tool result received")
+                            tool_entries.append(f"**Result:**\n```json\n{result_str}\n```")
                         except Exception as e:
-                            error_msg = f"Tool execution error: {str(e)}"
-                            tool_calls_log.append(f"**Error:** {error_msg}")
-                            steps_display = add_step("error", error_msg)
-                            yield (steps_display, thinking_content, response_content,
-                                   "\n".join(tool_calls_log), f"❌ {error_msg}")
+                            tool_entries.append(f"**Error:** {str(e)}")
+                
+                tool_calls_text = "\n\n".join(tool_entries)
+                error_text = collect_logs()
+                yield (build_output(input_text=input_text, thinking_text=thinking_text, 
+                                   tool_calls_text=tool_calls_text, error_text=error_text),
+                       "🔧 Tool calls processed")
             
             # Process final response
-            response_content = result.get("response", "")
-            if response_content:
-                steps_display = add_step("response", response_content)
-                yield (steps_display, thinking_content, response_content,
-                       "\n".join(tool_calls_log), "✅ Response complete")
+            response_text = result.get("response", "")
+            error_text = collect_logs()
+            
+            if response_text:
+                yield (build_output(input_text=input_text, thinking_text=thinking_text,
+                                   tool_calls_text=tool_calls_text, response_text=response_text,
+                                   error_text=error_text),
+                       "✅ Response complete")
             
             # Update conversation history
             self.conversation_history.append({"role": "user", "content": prompt})
             self.conversation_history.append({
                 "role": "assistant", 
-                "content": response_content,
+                "content": response_text,
                 "tool_calls": result.get("tool_calls")
             })
             
             # Final yield with complete status
-            status = f"✅ Complete | Tokens: {result.get('usage', {})}"
-            yield (steps_display, thinking_content, response_content,
-                   "\n".join(tool_calls_log), status)
+            usage = result.get('usage', {})
+            status = f"✅ Complete"
+            if usage:
+                status += f" | Tokens: {usage}"
+            yield (build_output(input_text=input_text, thinking_text=thinking_text,
+                               tool_calls_text=tool_calls_text, response_text=response_text,
+                               error_text=error_text), status)
             
         except Exception as e:
             error_msg = f"Error during LLM call: {str(e)}"
             logger.error(error_msg, exc_info=True)
-            steps_display = add_step("error", f"```\n{error_msg}\n```")
-            yield (steps_display, thinking_content, response_content,
-                   "\n".join(tool_calls_log), f"❌ {error_msg}")
-
-
-CUSTOM_CSS = """
-.step-container { 
-    max-height: 500px; 
-    overflow-y: auto; 
-    border: 1px solid #ddd; 
-    border-radius: 8px; 
-    padding: 10px;
-}
-.thinking-box {
-    background-color: #f0f7ff;
-    border-left: 4px solid #0066cc;
-    padding: 10px;
-    margin: 5px 0;
-}
-.response-box {
-    background-color: #f0fff0;
-    border-left: 4px solid #00cc66;
-    padding: 10px;
-    margin: 5px 0;
-}
-.tool-box {
-    background-color: #fff7f0;
-    border-left: 4px solid #cc6600;
-    padding: 10px;
-    margin: 5px 0;
-}
-"""
+            error_text = collect_logs()
+            error_text += f"\n\n**Exception:** {error_msg}"
+            yield (build_output(input_text=input_text, thinking_text=thinking_text,
+                               tool_calls_text=tool_calls_text, error_text=error_text),
+                   f"❌ {error_msg[:100]}")
 
 
 def create_gui() -> gr.Blocks:
@@ -311,24 +311,13 @@ def create_gui() -> gr.Blocks:
                 with gr.Accordion("Model Settings", open=True):
                     model_input = gr.Textbox(
                         label="Model Name",
-                        value=MODEL_NAME,
-                        placeholder="e.g., deepseek-r1-1.5b"
+                        value="gpt-4o-mini",
+                        placeholder="e.g., gpt-4o-mini, deepseek-r1:1.5b"
                     )
                     base_url_input = gr.Textbox(
                         label="Base URL",
-                        value=BASE_URL,
-                        placeholder="e.g., http://localhost:11434/v1"
-                    )
-                    api_key_input = gr.Textbox(
-                        label="API Key (optional for Ollama)",
                         value="",
-                        type="password",
-                        placeholder="Leave empty for Ollama"
-                    )
-                    provider_input = gr.Dropdown(
-                        label="Provider",
-                        choices=["openai", "ollama"],
-                        value="openai"
+                        placeholder="Leave empty for OpenAI, or http://localhost:11434/v1 for Ollama"
                     )
                 
                 with gr.Accordion("Generation Settings", open=True):
@@ -336,7 +325,7 @@ def create_gui() -> gr.Blocks:
                         label="Temperature",
                         minimum=0.0,
                         maximum=2.0,
-                        value=0.7,
+                        value=0.0,
                         step=0.1
                     )
                     max_tokens_slider = gr.Slider(
@@ -395,54 +384,22 @@ def create_gui() -> gr.Blocks:
                     interactive=False
                 )
                 
-                # Output tabs
-                with gr.Tabs():
-                    with gr.TabItem("📋 Steps Log"):
-                        steps_output = gr.Markdown(
-                            value="*Steps will appear here as processing progresses...*",
-                            elem_classes=["step-container"]
-                        )
-                    
-                    with gr.TabItem("🧠 Thinking/Reasoning"):
-                        thinking_output = gr.Markdown(
-                            value="*Reasoning content will appear here...*",
-                            elem_classes=["thinking-box"]
-                        )
-                    
-                    with gr.TabItem("💬 Final Response"):
-                        response_output = gr.Markdown(
-                            value="*Final response will appear here...*",
-                            elem_classes=["response-box"]
-                        )
-                    
-                    with gr.TabItem("🔧 Tool Calls"):
-                        tools_output = gr.Markdown(
-                            value="*Tool calls and results will appear here...*",
-                            elem_classes=["tool-box"]
-                        )
-        
-        # Examples section
-        gr.Markdown("### 📝 Example Prompts")
-        gr.Examples(
-            examples=[
-                ["Explain the concept of recursion with a simple example."],
-                ["What are the key differences between Python lists and tuples?"],
-                ["Write a haiku about artificial intelligence."],
-                ["Solve this step by step: If a train travels 120 km in 2 hours, what is its average speed?"],
-                ["What is the weather like today? (requires MCP tools)"],
-            ],
-            inputs=prompt_input
-        )
+                # Combined output display
+                gr.Markdown("### 📋 Output")
+                output_display = gr.Markdown(
+                    value="*Output will appear here showing: Input → Thinking → Tool Calls → Response*",
+                    elem_id="output-display"
+                )
         
         # Event handlers
-        def process_wrapper(prompt, model, base_url, api_key, temp, max_tok, sys_prompt, mgr_url, use_tools):
+        def process_wrapper(prompt, model, base_url, temp, max_tok, sys_prompt, mgr_url, use_tools):
             """Wrapper to handle the generator output."""
             if not prompt.strip():
-                yield ("", "", "", "", "⚠️ Please enter a prompt")
+                yield ("*Please enter a prompt*", "⚠️ Please enter a prompt")
                 return
             
             for result in agent.process_prompt(
-                prompt, model, base_url, api_key, temp, max_tok, sys_prompt, mgr_url, use_tools
+                prompt, model, base_url, temp, max_tok, sys_prompt, mgr_url, use_tools
             ):
                 yield result
         
@@ -454,12 +411,11 @@ def create_gui() -> gr.Blocks:
         def clear_wrapper():
             """Clear conversation and outputs."""
             agent.reset_conversation()
+            # Reset the client so new settings take effect
+            agent.current_client = None
             return (
                 "",  # prompt
-                "*Steps will appear here as processing progresses...*",
-                "*Reasoning content will appear here...*",
-                "*Final response will appear here...*",
-                "*Tool calls and results will appear here...*",
+                "*Output will appear here showing: Input → Thinking → Tool Calls → Response*",
                 "Ready"
             )
         
@@ -467,21 +423,21 @@ def create_gui() -> gr.Blocks:
         submit_btn.click(
             fn=process_wrapper,
             inputs=[
-                prompt_input, model_input, base_url_input, api_key_input,
+                prompt_input, model_input, base_url_input,
                 temperature_slider, max_tokens_slider, system_prompt_input,
                 manager_url_input, use_tools_checkbox
             ],
-            outputs=[steps_output, thinking_output, response_output, tools_output, status_display]
+            outputs=[output_display, status_display]
         )
         
         prompt_input.submit(
             fn=process_wrapper,
             inputs=[
-                prompt_input, model_input, base_url_input, api_key_input,
+                prompt_input, model_input, base_url_input,
                 temperature_slider, max_tokens_slider, system_prompt_input,
                 manager_url_input, use_tools_checkbox
             ],
-            outputs=[steps_output, thinking_output, response_output, tools_output, status_display]
+            outputs=[output_display, status_display]
         )
         
         init_mcp_btn.click(
@@ -493,7 +449,7 @@ def create_gui() -> gr.Blocks:
         clear_btn.click(
             fn=clear_wrapper,
             inputs=[],
-            outputs=[prompt_input, steps_output, thinking_output, response_output, tools_output, status_display]
+            outputs=[prompt_input, output_display, status_display]
         )
     
     return demo
@@ -517,8 +473,7 @@ def main():
         server_name=args.host,
         server_port=args.port,
         share=args.share,
-        show_error=True,
-        css=CUSTOM_CSS
+        show_error=True
     )
 
 

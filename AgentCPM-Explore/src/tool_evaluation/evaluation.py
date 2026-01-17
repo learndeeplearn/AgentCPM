@@ -116,9 +116,9 @@ async def main():
     
     # LLM related options
     parser.add_argument("--provider", default="openai", choices=["openai", "ollama"], help="LLM provider")
-    parser.add_argument("--model", default="deepseek-r1-1.5b", help="LLM model name")
+    parser.add_argument("--model", default="gpt-4o-mini", help="LLM model name")
     parser.add_argument("--api-key", help="API key")
-    parser.add_argument("--base-url", default="http://localhost:11434/v1", help="API base URL")
+    parser.add_argument("--base-url", help="API base URL")
     
     args = parser.parse_args()
     
