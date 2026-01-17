@@ -41,40 +41,51 @@ def extract_thinking(text: str) -> tuple:
     return thinking, cleaned
 
 
-def parse_tool_calls(text: str) -> tuple:
+def parse_tool_calls(text: str, valid_tools: List[str] = None) -> tuple:
     """
     Parse tool calls from response text.
     
-    Supports formats:
-    - JSON with {"name": "...", "arguments": {...}}
-    - Function call syntax
+    Only matches our known tools to avoid false positives.
+    
+    Args:
+        text: Response text to parse
+        valid_tools: List of valid tool names (default: web_search, fetch_webpage)
     
     Returns: (tool_calls_list, cleaned_text)
     """
     if not text:
         return [], text
     
+    if valid_tools is None:
+        valid_tools = ["web_search", "fetch_webpage"]
+    
     tool_calls = []
     
-    # Try to find JSON tool calls
+    # Try to find JSON tool calls - must match known tool names
     # Pattern: {"name": "tool_name", "arguments": {...}}
-    json_pattern = re.compile(r'\{[^{}]*"name"\s*:\s*"([^"]+)"[^{}]*"arguments"\s*:\s*(\{[^{}]*\})[^{}]*\}', re.DOTALL)
-    
-    for match in json_pattern.finditer(text):
-        try:
-            tool_name = match.group(1)
-            args_str = match.group(2)
-            
-            tool_calls.append({
-                "id": f"call_{random.randint(10000, 99999)}",
-                "type": "function",
-                "function": {
-                    "name": tool_name,
-                    "arguments": args_str
-                }
-            })
-        except Exception:
-            pass
+    for tool_name in valid_tools:
+        # Look for exact tool name in JSON format
+        pattern = re.compile(
+            r'\{\s*"name"\s*:\s*"' + re.escape(tool_name) + r'"\s*,\s*"arguments"\s*:\s*(\{[^{}]*\})\s*\}',
+            re.DOTALL
+        )
+        
+        for match in pattern.finditer(text):
+            try:
+                args_str = match.group(1)
+                # Validate it's valid JSON
+                json.loads(args_str)
+                
+                tool_calls.append({
+                    "id": f"call_{random.randint(10000, 99999)}",
+                    "type": "function",
+                    "function": {
+                        "name": tool_name,
+                        "arguments": args_str
+                    }
+                })
+            except Exception:
+                pass
     
     return tool_calls, text
 

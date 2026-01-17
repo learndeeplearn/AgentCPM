@@ -118,28 +118,13 @@ class AgentGUI:
             return f"❌ Failed to initialize client: {str(e)}"
 
     async def initialize_tools(self, use_mcp: bool = False, manager_url: str = None) -> str:
-        """Initialize tool handler (Simple or MCP)."""
+        """Initialize tool handler - uses simple built-in tools."""
         try:
-            if use_mcp and manager_url:
-                # Try MCP first
-                try:
-                    from mcp_handler import MCPHandler
-                    mcp_handler = MCPHandler(
-                        server_name="all",
-                        manager_url=manager_url
-                    )
-                    if await mcp_handler.initialize():
-                        self.tool_handler = mcp_handler
-                        tool_count = len(self.tool_handler.openai_tools)
-                        return f"✅ MCP initialized with {tool_count} tools"
-                except Exception as e:
-                    logger.warning(f"MCP init failed: {e}, falling back to simple tools")
-            
-            # Use simple built-in tools
+            # Just use simple built-in tools (no MCP dependency)
             self.tool_handler = SimpleToolHandler()
             await self.tool_handler.initialize()
             tool_names = [t["function"]["name"] for t in self.tool_handler.openai_tools]
-            return f"✅ Simple tools initialized: {', '.join(tool_names)}"
+            return f"✅ Tools ready: {', '.join(tool_names)}"
             
         except Exception as e:
             return f"❌ Tool init error: {str(e)}"
@@ -169,7 +154,8 @@ class AgentGUI:
         max_tokens: int,
         system_prompt: str,
         manager_url: str,
-        use_tools: bool
+        use_tools: bool,
+        max_iterations: int = 5
     ) -> Generator[tuple, None, None]:
         """
         Process a user prompt and yield step-by-step updates.
@@ -281,124 +267,155 @@ class AgentGUI:
                 current_status = f"🔧 {len(tools)} tools available"
                 yield (build_output(input_text=input_text, status_text=current_status), current_status)
         
-        current_status = "🔄 Calling LLM (this may take a while)..."
-        yield (build_output(input_text=input_text, status_text=current_status), current_status)
+        # Agent loop - iterate until complete or max iterations
+        all_thinking = []
+        all_tool_calls = []
+        final_response = ""
+        iteration = 0
         
-        # Call LLM
         try:
-            result = self.current_client.create_completion(
-                messages=messages,
-                tools=tools,
-                stream=True,
-                temperature=temperature,
-                max_tokens=max_tokens if max_tokens > 0 else None
-            )
-            
-            logs_text = collect_logs()
-            current_status = "✅ LLM response received"
-            yield (build_output(input_text=input_text, logs_text=logs_text, status_text=current_status), current_status)
-            
-            # Process thinking/reasoning - check multiple sources
-            thinking_text = result.get("thought", "")
-            raw_response = result.get("response", "")
-            
-            # If no explicit thought, try to extract from response
-            if not thinking_text and raw_response:
-                extracted_thinking, cleaned_response = extract_thinking_from_response(raw_response)
-                if extracted_thinking:
-                    thinking_text = extracted_thinking
-                    # Update response to cleaned version
-                    result["response"] = cleaned_response
-            
-            if thinking_text:
-                current_status = "🧠 Reasoning/thinking extracted"
-                yield (build_output(input_text=input_text, thinking_text=thinking_text, logs_text=logs_text, status_text=current_status), 
-                       current_status)
-            
-            # Process tool calls
-            if result.get("tool_calls"):
-                tool_entries = []
-                for i, tool_call in enumerate(result["tool_calls"]):
-                    func_name = tool_call.get("function", {}).get("name", "unknown")
-                    func_args = tool_call.get("function", {}).get("arguments", "{}")
-                    
-                    tool_entry = f"**Tool {i+1}:** `{func_name}`\n**Arguments:**\n```json\n{func_args}\n```"
-                    tool_entries.append(tool_entry)
-                    
-                    current_status = f"🔧 Executing tool: {func_name}"
-                    tool_calls_text = "\n\n".join(tool_entries)
-                    yield (build_output(input_text=input_text, thinking_text=thinking_text, 
-                                       tool_calls_text=tool_calls_text, logs_text=logs_text, status_text=current_status),
-                           current_status)
-                    
-                    # Execute tool call if tool handler available
-                    if self.tool_handler:
+            while iteration < max_iterations:
+                iteration += 1
+                current_status = f"🔄 Iteration {iteration}/{max_iterations}: Calling LLM..."
+                yield (build_output(input_text=input_text, thinking_text="\n\n".join(all_thinking),
+                                   tool_calls_text="\n\n---\n\n".join(all_tool_calls), status_text=current_status), current_status)
+                
+                # Call LLM
+                result = self.current_client.create_completion(
+                    messages=messages,
+                    tools=tools,
+                    stream=True,
+                    temperature=temperature,
+                    max_tokens=max_tokens if max_tokens > 0 else None
+                )
+                
+                logs_text = collect_logs()
+                
+                # Check for errors
+                if result.get("error"):
+                    current_status = f"❌ LLM Error: {result['error']}"
+                    yield (build_output(input_text=input_text, thinking_text="\n\n".join(all_thinking),
+                                       tool_calls_text="\n\n---\n\n".join(all_tool_calls), 
+                                       logs_text=logs_text, status_text=current_status), current_status)
+                    break
+                
+                current_status = f"✅ Iteration {iteration}: Response received"
+                yield (build_output(input_text=input_text, logs_text=logs_text, status_text=current_status), current_status)
+                
+                # Process thinking/reasoning
+                thinking_text = result.get("thought", "")
+                raw_response = result.get("response", "")
+                
+                # Extract thinking from response if not explicit
+                if not thinking_text and raw_response:
+                    extracted_thinking, cleaned_response = extract_thinking_from_response(raw_response)
+                    if extracted_thinking:
+                        thinking_text = extracted_thinking
+                        result["response"] = cleaned_response
+                        raw_response = cleaned_response
+                
+                if thinking_text:
+                    all_thinking.append(f"**Iteration {iteration}:**\n{thinking_text}")
+                    current_status = f"🧠 Iteration {iteration}: Thinking extracted"
+                    yield (build_output(input_text=input_text, thinking_text="\n\n".join(all_thinking), 
+                                       logs_text=logs_text, status_text=current_status), current_status)
+                
+                # Check for tool calls
+                tool_calls = result.get("tool_calls", [])
+                
+                if tool_calls and self.tool_handler:
+                    iteration_tools = []
+                    for i, tool_call in enumerate(tool_calls):
+                        func_name = tool_call.get("function", {}).get("name", "unknown")
+                        func_args_str = tool_call.get("function", {}).get("arguments", "{}")
+                        
+                        # Skip invalid tool names
+                        if func_name not in ["web_search", "fetch_webpage"]:
+                            logger.warning(f"Skipping invalid tool: {func_name}")
+                            continue
+                        
+                        tool_entry = f"**Tool:** `{func_name}`\n**Arguments:**\n```json\n{func_args_str}\n```"
+                        iteration_tools.append(tool_entry)
+                        
+                        current_status = f"🔧 Iteration {iteration}: Executing {func_name}..."
+                        yield (build_output(input_text=input_text, thinking_text="\n\n".join(all_thinking), 
+                                           tool_calls_text="\n\n---\n\n".join(all_tool_calls + iteration_tools),
+                                           logs_text=logs_text, status_text=current_status), current_status)
+                        
+                        # Execute tool
                         try:
+                            func_args = json.loads(func_args_str)
                             loop = asyncio.new_event_loop()
                             asyncio.set_event_loop(loop)
                             tool_result = loop.run_until_complete(
-                                self.tool_handler.call_tool(func_name, json.loads(func_args))
+                                self.tool_handler.call_tool(func_name, func_args)
                             )
                             loop.close()
                             
                             result_str = json.dumps(tool_result, indent=2, ensure_ascii=False)
-                            if len(result_str) > 3000:
-                                result_str = result_str[:3000] + "\n... (truncated)"
+                            if len(result_str) > 2000:
+                                result_str = result_str[:2000] + "\n... (truncated)"
                             
-                            tool_entries.append(f"**Result:**\n```json\n{result_str}\n```")
-                            current_status = f"✅ Tool {func_name} completed"
+                            iteration_tools.append(f"**Result:**\n```json\n{result_str}\n```")
+                            
+                            # Add tool result to messages for next iteration
+                            messages.append({"role": "assistant", "content": raw_response})
+                            messages.append({
+                                "role": "user", 
+                                "content": f"Tool '{func_name}' returned:\n{result_str}\n\nPlease analyze these results and continue with the task. If you need more information, use another tool. If you have enough information, provide your final answer."
+                            })
+                            
+                            current_status = f"✅ Iteration {iteration}: {func_name} completed"
                         except Exception as e:
-                            tool_entries.append(f"**Error:** {str(e)}")
-                            current_status = f"❌ Tool {func_name} failed: {str(e)[:50]}"
+                            iteration_tools.append(f"**Error:** {str(e)}")
+                            messages.append({"role": "assistant", "content": raw_response})
+                            messages.append({
+                                "role": "user",
+                                "content": f"Tool '{func_name}' failed with error: {str(e)}\n\nPlease try a different approach or provide your best answer based on available information."
+                            })
+                            current_status = f"⚠️ Iteration {iteration}: {func_name} failed"
                         
-                        tool_calls_text = "\n\n".join(tool_entries)
                         logs_text = collect_logs()
-                        yield (build_output(input_text=input_text, thinking_text=thinking_text, 
-                                           tool_calls_text=tool_calls_text, logs_text=logs_text, status_text=current_status),
-                               current_status)
+                        yield (build_output(input_text=input_text, thinking_text="\n\n".join(all_thinking), 
+                                           tool_calls_text="\n\n---\n\n".join(all_tool_calls + iteration_tools),
+                                           logs_text=logs_text, status_text=current_status), current_status)
+                    
+                    if iteration_tools:
+                        all_tool_calls.append(f"**Iteration {iteration}:**\n" + "\n".join(iteration_tools))
+                    
+                    # Continue to next iteration to process tool results
+                    continue
                 
-                current_status = "🔧 All tool calls processed"
-                yield (build_output(input_text=input_text, thinking_text=thinking_text, 
-                                   tool_calls_text=tool_calls_text, logs_text=logs_text, status_text=current_status),
-                       current_status)
+                # No tool calls - this is the final response
+                final_response = result.get("response", "")
+                
+                # Update conversation history
+                self.conversation_history.append({"role": "user", "content": prompt})
+                self.conversation_history.append({"role": "assistant", "content": final_response})
+                
+                break  # Exit loop - we have a final response
             
-            # Process final response
-            response_text = result.get("response", "")
+            # Final output
             logs_text = collect_logs()
-            
-            if response_text:
-                current_status = "✅ Response ready"
-                yield (build_output(input_text=input_text, thinking_text=thinking_text,
-                                   tool_calls_text=tool_calls_text, response_text=response_text,
-                                   logs_text=logs_text, status_text=current_status),
-                       current_status)
-            
-            # Update conversation history
-            self.conversation_history.append({"role": "user", "content": prompt})
-            self.conversation_history.append({
-                "role": "assistant", 
-                "content": response_text,
-                "tool_calls": result.get("tool_calls")
-            })
-            
-            # Final yield with complete status
-            usage = result.get('usage', {})
-            status = f"✅ Complete"
+            usage = result.get('usage', {}) if 'result' in dir() else {}
+            status = f"✅ Complete ({iteration} iteration{'s' if iteration > 1 else ''})"
             if usage:
-                status += f" | Tokens: {usage}"
-            yield (build_output(input_text=input_text, thinking_text=thinking_text,
-                               tool_calls_text=tool_calls_text, response_text=response_text,
+                status += f" | Tokens: {usage.get('total_tokens', 'N/A')}"
+            
+            yield (build_output(input_text=input_text, thinking_text="\n\n".join(all_thinking),
+                               tool_calls_text="\n\n---\n\n".join(all_tool_calls), 
+                               response_text=final_response,
                                logs_text=logs_text, status_text=status), status)
             
         except Exception as e:
-            error_msg = f"Error during LLM call: {str(e)}"
+            error_msg = f"Error during agent loop: {str(e)}"
             logger.error(error_msg, exc_info=True)
             logs_text = collect_logs()
             logs_text += f"\n\n**Exception:** {error_msg}"
             current_status = f"❌ Error: {error_msg[:80]}"
-            yield (build_output(input_text=input_text, thinking_text=thinking_text,
-                               tool_calls_text=tool_calls_text, logs_text=logs_text, status_text=current_status),
-                   current_status)
+            yield (build_output(input_text=input_text, thinking_text="\n\n".join(all_thinking),
+                               tool_calls_text="\n\n---\n\n".join(all_tool_calls), 
+                               logs_text=logs_text, status_text=current_status), current_status)
 
 
 def create_gui() -> gr.Blocks:
@@ -471,11 +488,33 @@ def create_gui() -> gr.Blocks:
                     *Tools are initialized automatically when you send a message with "Enable Tools" checked.*
                     """)
                 
+                with gr.Accordion("Agent Settings", open=False):
+                    max_iterations_slider = gr.Slider(
+                        label="Max Iterations (for complex tasks)",
+                        minimum=1,
+                        maximum=10,
+                        value=5,
+                        step=1,
+                        info="How many think→tool→think cycles for complex tasks"
+                    )
+                
                 with gr.Accordion("System Prompt", open=False):
                     system_prompt_input = gr.Textbox(
                         label="System Prompt",
-                        value="You are a helpful AI assistant that thinks step-by-step and explains your reasoning clearly.",
-                        lines=3,
+                        value="""You are a helpful AI assistant that thinks step-by-step and can use tools.
+
+When you need information from the internet, use the available tools:
+- web_search: Search the web for information
+- fetch_webpage: Read content from a specific URL
+
+To use a tool, output JSON in this exact format:
+{"name": "web_search", "arguments": {"query": "your search query"}}
+or
+{"name": "fetch_webpage", "arguments": {"url": "https://example.com"}}
+
+After receiving tool results, analyze them and continue your reasoning.
+For complex tasks, break them into steps and use tools multiple times as needed.""",
+                        lines=6,
                         placeholder="Enter system prompt..."
                     )
             
@@ -515,14 +554,14 @@ def create_gui() -> gr.Blocks:
                 )
         
         # Event handlers
-        def process_wrapper(prompt, model, base_url, temp, max_tok, sys_prompt, mgr_url, use_tools):
+        def process_wrapper(prompt, model, base_url, temp, max_tok, max_iter, sys_prompt, mgr_url, use_tools):
             """Wrapper to handle the generator output."""
             if not prompt.strip():
                 yield ("*Please enter a prompt*", "⚠️ Please enter a prompt")
                 return
             
             for result in agent.process_prompt(
-                prompt, model, base_url, temp, max_tok, sys_prompt, mgr_url, use_tools
+                prompt, model, base_url, temp, max_tok, sys_prompt, mgr_url, use_tools, int(max_iter)
             ):
                 yield result
         
@@ -547,8 +586,8 @@ def create_gui() -> gr.Blocks:
             fn=process_wrapper,
             inputs=[
                 prompt_input, model_input, base_url_input,
-                temperature_slider, max_tokens_slider, system_prompt_input,
-                manager_url_input, use_tools_checkbox
+                temperature_slider, max_tokens_slider, max_iterations_slider,
+                system_prompt_input, manager_url_input, use_tools_checkbox
             ],
             outputs=[output_display, status_display]
         )
@@ -557,8 +596,8 @@ def create_gui() -> gr.Blocks:
             fn=process_wrapper,
             inputs=[
                 prompt_input, model_input, base_url_input,
-                temperature_slider, max_tokens_slider, system_prompt_input,
-                manager_url_input, use_tools_checkbox
+                temperature_slider, max_tokens_slider, max_iterations_slider,
+                system_prompt_input, manager_url_input, use_tools_checkbox
             ],
             outputs=[output_display, status_display]
         )
