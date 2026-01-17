@@ -29,6 +29,7 @@ sys.path.insert(0, str(script_dir))
 from extended_openai_client import (
     get_extended_llm_client, LLMClientManager
 )
+from simple_tools import SimpleToolHandler, SIMPLE_TOOLS
 
 # Configure logging to capture logs for GUI display
 log_buffer = io.StringIO()
@@ -89,7 +90,7 @@ class AgentGUI:
     
     def __init__(self):
         self.client_manager = LLMClientManager()
-        self.mcp_handler = None
+        self.tool_handler = None  # Can be SimpleToolHandler or MCPHandler
         self.current_client = None
         self.conversation_history = []
         self.step_counter = 0
@@ -116,21 +117,36 @@ class AgentGUI:
         except Exception as e:
             return f"❌ Failed to initialize client: {str(e)}"
 
-    async def initialize_mcp(self, manager_url: str) -> str:
-        """Initialize MCP handler."""
+    async def initialize_tools(self, use_mcp: bool = False, manager_url: str = None) -> str:
+        """Initialize tool handler (Simple or MCP)."""
         try:
-            from mcp_handler import MCPHandler
-            self.mcp_handler = MCPHandler(
-                server_name="all",
-                manager_url=manager_url
-            )
-            if await self.mcp_handler.initialize():
-                tool_count = len(self.mcp_handler.openai_tools)
-                return f"✅ MCP initialized with {tool_count} tools"
-            else:
-                return "❌ MCP initialization failed"
+            if use_mcp and manager_url:
+                # Try MCP first
+                try:
+                    from mcp_handler import MCPHandler
+                    mcp_handler = MCPHandler(
+                        server_name="all",
+                        manager_url=manager_url
+                    )
+                    if await mcp_handler.initialize():
+                        self.tool_handler = mcp_handler
+                        tool_count = len(self.tool_handler.openai_tools)
+                        return f"✅ MCP initialized with {tool_count} tools"
+                except Exception as e:
+                    logger.warning(f"MCP init failed: {e}, falling back to simple tools")
+            
+            # Use simple built-in tools
+            self.tool_handler = SimpleToolHandler()
+            await self.tool_handler.initialize()
+            tool_names = [t["function"]["name"] for t in self.tool_handler.openai_tools]
+            return f"✅ Simple tools initialized: {', '.join(tool_names)}"
+            
         except Exception as e:
-            return f"❌ MCP error: {str(e)}"
+            return f"❌ Tool init error: {str(e)}"
+
+    async def initialize_mcp(self, manager_url: str) -> str:
+        """Initialize MCP handler (legacy, now also initializes simple tools as fallback)."""
+        return await self.initialize_tools(use_mcp=True, manager_url=manager_url)
 
     def reset_conversation(self):
         """Reset conversation history."""
@@ -237,15 +253,33 @@ class AgentGUI:
         
         # Get tools if enabled
         tools = None
-        if use_tools and self.mcp_handler:
-            tools = self.mcp_handler.openai_tools
-            input_text += f"\n**Tools:** {len(tools)} tools available"
-            current_status = f"🔧 {len(tools)} MCP tools loaded"
-            yield (build_output(input_text=input_text, status_text=current_status), current_status)
-        elif use_tools:
-            input_text += f"\n**Tools:** ⚠️ MCP not initialized - no tools available"
-            current_status = "⚠️ MCP tools not available"
-            yield (build_output(input_text=input_text, status_text=current_status), current_status)
+        if use_tools:
+            # Initialize tools if not already done
+            if not self.tool_handler:
+                current_status = "🔧 Initializing tools..."
+                yield (build_output(input_text=input_text, status_text=current_status), current_status)
+                
+                loop = asyncio.new_event_loop()
+                asyncio.set_event_loop(loop)
+                init_result = loop.run_until_complete(self.initialize_tools(use_mcp=True, manager_url=manager_url))
+                loop.close()
+                
+                logs_text = collect_logs()
+                if "❌" in init_result:
+                    input_text += f"\n**Tools:** {init_result}"
+                    current_status = init_result
+                    yield (build_output(input_text=input_text, logs_text=logs_text, status_text=current_status), current_status)
+                else:
+                    input_text += f"\n**Tools:** {init_result}"
+                    current_status = init_result
+                    yield (build_output(input_text=input_text, logs_text=logs_text, status_text=current_status), current_status)
+            
+            if self.tool_handler:
+                tools = self.tool_handler.openai_tools
+                tool_names = [t["function"]["name"] for t in tools]
+                input_text += f"\n**Available tools:** {', '.join(tool_names)}"
+                current_status = f"🔧 {len(tools)} tools available"
+                yield (build_output(input_text=input_text, status_text=current_status), current_status)
         
         current_status = "🔄 Calling LLM (this may take a while)..."
         yield (build_output(input_text=input_text, status_text=current_status), current_status)
@@ -297,19 +331,19 @@ class AgentGUI:
                                        tool_calls_text=tool_calls_text, logs_text=logs_text, status_text=current_status),
                            current_status)
                     
-                    # Execute tool call if MCP handler available
-                    if self.mcp_handler:
+                    # Execute tool call if tool handler available
+                    if self.tool_handler:
                         try:
                             loop = asyncio.new_event_loop()
                             asyncio.set_event_loop(loop)
                             tool_result = loop.run_until_complete(
-                                self.mcp_handler.call_tool(func_name, json.loads(func_args))
+                                self.tool_handler.call_tool(func_name, json.loads(func_args))
                             )
                             loop.close()
                             
                             result_str = json.dumps(tool_result, indent=2, ensure_ascii=False)
-                            if len(result_str) > 2000:
-                                result_str = result_str[:2000] + "\n... (truncated)"
+                            if len(result_str) > 3000:
+                                result_str = result_str[:3000] + "\n... (truncated)"
                             
                             tool_entries.append(f"**Result:**\n```json\n{result_str}\n```")
                             current_status = f"✅ Tool {func_name} completed"
@@ -413,28 +447,28 @@ def create_gui() -> gr.Blocks:
                         step=256
                     )
                 
-                with gr.Accordion("MCP Tools Settings", open=True):
+                with gr.Accordion("Tools Settings", open=True):
                     manager_url_input = gr.Textbox(
-                        label="MCP Manager URL",
+                        label="MCP Manager URL (optional)",
                         value="http://localhost:8000/mcpapi",
-                        placeholder="MCP Manager API URL"
+                        placeholder="MCP Manager API URL (leave default for simple tools)"
                     )
                     use_tools_checkbox = gr.Checkbox(
-                        label="Enable MCP Tools",
+                        label="Enable Tools (web_search, fetch_webpage)",
                         value=True
                     )
-                    init_mcp_btn = gr.Button("🔌 Initialize MCP", variant="secondary")
+                    init_mcp_btn = gr.Button("🔧 Initialize Tools", variant="secondary")
                     mcp_status = gr.Textbox(
-                        label="MCP Status",
-                        value="Not initialized",
+                        label="Tools Status",
+                        value="Not initialized (will auto-init on first use)",
                         interactive=False
                     )
                     gr.Markdown("""
-                    **Available MCP Tools** (when connected):
-                    - 🔍 Search (web search via multiple engines)
-                    - 🌐 Browse (web page content extraction)
-                    - 📄 Read File (enhanced file reading)
-                    - And more depending on MCP server configuration
+                    **Built-in Tools** (always available):
+                    - 🔍 **web_search** - Search the web using DuckDuckGo
+                    - 🌐 **fetch_webpage** - Fetch and extract content from URLs
+                    
+                    *Tools are initialized automatically when you send a message with "Enable Tools" checked.*
                     """)
                 
                 with gr.Accordion("System Prompt", open=False):
@@ -492,9 +526,9 @@ def create_gui() -> gr.Blocks:
             ):
                 yield result
         
-        async def init_mcp_wrapper(manager_url):
-            """Wrapper for MCP initialization."""
-            result = await agent.initialize_mcp(manager_url)
+        async def init_tools_wrapper(manager_url):
+            """Wrapper for tools initialization."""
+            result = await agent.initialize_tools(use_mcp=True, manager_url=manager_url)
             return result
         
         def clear_wrapper():
@@ -530,7 +564,7 @@ def create_gui() -> gr.Blocks:
         )
         
         init_mcp_btn.click(
-            fn=init_mcp_wrapper,
+            fn=init_tools_wrapper,
             inputs=[manager_url_input],
             outputs=[mcp_status]
         )
@@ -544,112 +578,24 @@ def create_gui() -> gr.Blocks:
     return demo
 
 
-def start_mcp_server(config_path: str = None, port: int = 8000):
-    """
-    Start the MCP search server directly (simpler than full MCP stack).
-    
-    Args:
-        config_path: Path to MCP config file (not used for simple server)
-        port: Port to run MCP server on
-    
-    Returns:
-        subprocess.Popen or None
-    """
-    import subprocess
-    import time
-    
-    # Find the search MCP server
-    search_server_paths = [
-        project_root / "AgentDock" / "agentdock-node-explore" / "mcp_servers" / "search-mcp" / "src" / "search_server.py",
-        script_dir.parent / "AgentDock" / "agentdock-node-explore" / "mcp_servers" / "search-mcp" / "src" / "search_server.py",
-    ]
-    
-    search_server = None
-    for path in search_server_paths:
-        if path.exists():
-            search_server = path
-            break
-    
-    if not search_server:
-        logger.warning("MCP search server not found. Search tools will not be available.")
-        logger.warning(f"Searched paths: {search_server_paths}")
-        logger.info("You can still use the LLM without MCP tools.")
-        return None
-    
-    logger.info(f"Starting MCP search server from: {search_server}")
-    
-    try:
-        # Create log file for MCP server output
-        mcp_log_path = script_dir / "mcp_server.log"
-        mcp_log = open(mcp_log_path, "w")
-        
-        # Start the search server in HTTP mode
-        process = subprocess.Popen(
-            ["python", str(search_server), "--http", "--host", "0.0.0.0", "--port", str(port)],
-            cwd=str(search_server.parent),
-            stdout=mcp_log,
-            stderr=subprocess.STDOUT
-        )
-        
-        # Wait a bit for server to start
-        time.sleep(3)
-        
-        if process.poll() is None:
-            logger.info(f"MCP search server started on port {port}")
-            logger.info(f"MCP server logs: {mcp_log_path}")
-            logger.info("Available tools: search, fetch_url (web browsing)")
-            return process
-        else:
-            # Read log file to get error details
-            mcp_log.close()
-            with open(mcp_log_path, "r") as f:
-                error_log = f.read()
-            logger.error(f"MCP search server failed to start. Log output:\n{error_log}")
-            logger.info("Tip: Install required packages with: pip install mcp tiktoken httpx pydantic")
-            return None
-            
-    except Exception as e:
-        logger.error(f"Failed to start MCP server: {e}")
-        return None
 
-
-# Global variable to store MCP server logs
-mcp_server_log_path = None
 
 
 def main():
     """Main entry point for the GUI application."""
     import argparse
-    import atexit
     
     parser = argparse.ArgumentParser(description="AgentCPM-MCP GUI Application")
     parser.add_argument("--host", default="0.0.0.0", help="Host to bind to")
     parser.add_argument("--port", type=int, default=12000, help="Port to run on")
-    parser.add_argument("--mcp-port", type=int, default=8000, help="Port for MCP server")
     parser.add_argument("--share", action="store_true", help="Create a public link")
     parser.add_argument("--no-browser", action="store_true", help="Don't auto-open browser")
-    parser.add_argument("--no-mcp", action="store_true", help="Don't auto-start MCP server")
     
     args = parser.parse_args()
     
-    mcp_process = None
-    
-    # Auto-start MCP server
-    if not args.no_mcp:
-        logger.info("Attempting to start MCP server...")
-        mcp_process = start_mcp_server(port=args.mcp_port)
-        
-        if mcp_process:
-            # Register cleanup on exit
-            def cleanup_mcp():
-                if mcp_process and mcp_process.poll() is None:
-                    logger.info("Shutting down MCP server...")
-                    mcp_process.terminate()
-                    mcp_process.wait(timeout=5)
-            
-            atexit.register(cleanup_mcp)
-    
     logger.info(f"Starting AgentCPM-MCP GUI on {args.host}:{args.port}")
+    logger.info("Built-in tools available: web_search, fetch_webpage")
+    logger.info("Tools will be initialized automatically when used.")
     
     demo = create_gui()
     demo.launch(
