@@ -164,9 +164,13 @@ class AgentGUI:
         output_parts = []
         logs_accumulated = []
         
-        def build_output(input_text="", thinking_text="", tool_calls_text="", response_text="", logs_text=""):
+        def build_output(input_text="", thinking_text="", tool_calls_text="", response_text="", logs_text="", status_text=""):
             """Build combined output from all sections."""
             sections = []
+            
+            # Status at the top
+            if status_text:
+                sections.append(f"**⏳ Status:** {status_text}\n")
             
             if input_text:
                 sections.append(f"### 📝 INPUT\n\n{input_text}")
@@ -183,7 +187,7 @@ class AgentGUI:
             if logs_text:
                 sections.append(f"### 📋 LOGS\n\n```\n{logs_text}\n```")
             
-            return "\n\n---\n\n".join(sections)
+            return "\n\n---\n\n".join(sections) if sections else "*Processing...*"
         
         # Collect logs
         def collect_logs():
@@ -197,19 +201,24 @@ class AgentGUI:
         tool_calls_text = ""
         response_text = ""
         logs_text = ""
+        current_status = "🔄 Processing input..."
         
         # Step 1: Input received
-        yield (build_output(input_text=input_text), "🔄 Processing input...")
+        yield (build_output(input_text=input_text, status_text=current_status), current_status)
         
         # Initialize client if needed
         if not self.current_client:
+            current_status = "🔄 Initializing LLM client..."
+            yield (build_output(input_text=input_text, status_text=current_status), current_status)
+            
             init_result = self.initialize_client(model, base_url)
             logs_text = collect_logs()
             if "❌" in init_result:
                 logs_text += f"\n{init_result}"
-                yield (build_output(input_text=input_text, logs_text=logs_text), init_result)
+                yield (build_output(input_text=input_text, logs_text=logs_text, status_text=init_result), init_result)
                 return
-            yield (build_output(input_text=input_text, logs_text=logs_text), "🔄 Client initialized...")
+            current_status = "✅ Client initialized"
+            yield (build_output(input_text=input_text, logs_text=logs_text, status_text=current_status), current_status)
         
         # Build messages
         messages = []
@@ -223,14 +232,23 @@ class AgentGUI:
         messages.append({"role": "user", "content": prompt})
         
         input_text += f"\n\n**Context:** {len(messages)} messages in conversation"
-        yield (build_output(input_text=input_text), "🔄 Calling LLM...")
+        current_status = "🔄 Preparing request..."
+        yield (build_output(input_text=input_text, status_text=current_status), current_status)
         
         # Get tools if enabled
         tools = None
         if use_tools and self.mcp_handler:
             tools = self.mcp_handler.openai_tools
             input_text += f"\n**Tools:** {len(tools)} tools available"
-            yield (build_output(input_text=input_text), "🔄 Tools loaded...")
+            current_status = f"🔧 {len(tools)} MCP tools loaded"
+            yield (build_output(input_text=input_text, status_text=current_status), current_status)
+        elif use_tools:
+            input_text += f"\n**Tools:** ⚠️ MCP not initialized - no tools available"
+            current_status = "⚠️ MCP tools not available"
+            yield (build_output(input_text=input_text, status_text=current_status), current_status)
+        
+        current_status = "🔄 Calling LLM (this may take a while)..."
+        yield (build_output(input_text=input_text, status_text=current_status), current_status)
         
         # Call LLM
         try:
@@ -243,6 +261,8 @@ class AgentGUI:
             )
             
             logs_text = collect_logs()
+            current_status = "✅ LLM response received"
+            yield (build_output(input_text=input_text, logs_text=logs_text, status_text=current_status), current_status)
             
             # Process thinking/reasoning - check multiple sources
             thinking_text = result.get("thought", "")
@@ -257,8 +277,9 @@ class AgentGUI:
                     result["response"] = cleaned_response
             
             if thinking_text:
-                yield (build_output(input_text=input_text, thinking_text=thinking_text, logs_text=logs_text), 
-                       "🧠 Reasoning complete...")
+                current_status = "🧠 Reasoning/thinking extracted"
+                yield (build_output(input_text=input_text, thinking_text=thinking_text, logs_text=logs_text, status_text=current_status), 
+                       current_status)
             
             # Process tool calls
             if result.get("tool_calls"):
@@ -269,6 +290,12 @@ class AgentGUI:
                     
                     tool_entry = f"**Tool {i+1}:** `{func_name}`\n**Arguments:**\n```json\n{func_args}\n```"
                     tool_entries.append(tool_entry)
+                    
+                    current_status = f"🔧 Executing tool: {func_name}"
+                    tool_calls_text = "\n\n".join(tool_entries)
+                    yield (build_output(input_text=input_text, thinking_text=thinking_text, 
+                                       tool_calls_text=tool_calls_text, logs_text=logs_text, status_text=current_status),
+                           current_status)
                     
                     # Execute tool call if MCP handler available
                     if self.mcp_handler:
@@ -281,28 +308,36 @@ class AgentGUI:
                             loop.close()
                             
                             result_str = json.dumps(tool_result, indent=2, ensure_ascii=False)
-                            if len(result_str) > 1000:
-                                result_str = result_str[:1000] + "\n... (truncated)"
+                            if len(result_str) > 2000:
+                                result_str = result_str[:2000] + "\n... (truncated)"
                             
                             tool_entries.append(f"**Result:**\n```json\n{result_str}\n```")
+                            current_status = f"✅ Tool {func_name} completed"
                         except Exception as e:
                             tool_entries.append(f"**Error:** {str(e)}")
+                            current_status = f"❌ Tool {func_name} failed: {str(e)[:50]}"
+                        
+                        tool_calls_text = "\n\n".join(tool_entries)
+                        logs_text = collect_logs()
+                        yield (build_output(input_text=input_text, thinking_text=thinking_text, 
+                                           tool_calls_text=tool_calls_text, logs_text=logs_text, status_text=current_status),
+                               current_status)
                 
-                tool_calls_text = "\n\n".join(tool_entries)
-                logs_text = collect_logs()
+                current_status = "🔧 All tool calls processed"
                 yield (build_output(input_text=input_text, thinking_text=thinking_text, 
-                                   tool_calls_text=tool_calls_text, logs_text=logs_text),
-                       "🔧 Tool calls processed")
+                                   tool_calls_text=tool_calls_text, logs_text=logs_text, status_text=current_status),
+                       current_status)
             
             # Process final response
             response_text = result.get("response", "")
             logs_text = collect_logs()
             
             if response_text:
+                current_status = "✅ Response ready"
                 yield (build_output(input_text=input_text, thinking_text=thinking_text,
                                    tool_calls_text=tool_calls_text, response_text=response_text,
-                                   logs_text=logs_text),
-                       "✅ Response complete")
+                                   logs_text=logs_text, status_text=current_status),
+                       current_status)
             
             # Update conversation history
             self.conversation_history.append({"role": "user", "content": prompt})
@@ -319,16 +354,17 @@ class AgentGUI:
                 status += f" | Tokens: {usage}"
             yield (build_output(input_text=input_text, thinking_text=thinking_text,
                                tool_calls_text=tool_calls_text, response_text=response_text,
-                               logs_text=logs_text), status)
+                               logs_text=logs_text, status_text=status), status)
             
         except Exception as e:
             error_msg = f"Error during LLM call: {str(e)}"
             logger.error(error_msg, exc_info=True)
             logs_text = collect_logs()
             logs_text += f"\n\n**Exception:** {error_msg}"
+            current_status = f"❌ Error: {error_msg[:80]}"
             yield (build_output(input_text=input_text, thinking_text=thinking_text,
-                               tool_calls_text=tool_calls_text, logs_text=logs_text),
-                   f"❌ {error_msg[:100]}")
+                               tool_calls_text=tool_calls_text, logs_text=logs_text, status_text=current_status),
+                   current_status)
 
 
 def create_gui() -> gr.Blocks:
@@ -510,10 +546,10 @@ def create_gui() -> gr.Blocks:
 
 def start_mcp_server(config_path: str = None, port: int = 8000):
     """
-    Start the MCP server in a subprocess.
+    Start the MCP search server directly (simpler than full MCP stack).
     
     Args:
-        config_path: Path to MCP config file
+        config_path: Path to MCP config file (not used for simple server)
         port: Port to run MCP server on
     
     Returns:
@@ -522,55 +558,35 @@ def start_mcp_server(config_path: str = None, port: int = 8000):
     import subprocess
     import time
     
-    # Find the MCP server main.py
-    mcp_server_paths = [
-        project_root / "AgentDock" / "agentdock-node-explore" / "main.py",
-        project_root / "AgentDock" / "node" / "main.py",
-        script_dir.parent / "AgentDock" / "agentdock-node-explore" / "main.py",
+    # Find the search MCP server
+    search_server_paths = [
+        project_root / "AgentDock" / "agentdock-node-explore" / "mcp_servers" / "search-mcp" / "src" / "search_server.py",
+        script_dir.parent / "AgentDock" / "agentdock-node-explore" / "mcp_servers" / "search-mcp" / "src" / "search_server.py",
     ]
     
-    mcp_main = None
-    for path in mcp_server_paths:
+    search_server = None
+    for path in search_server_paths:
         if path.exists():
-            mcp_main = path
+            search_server = path
             break
     
-    if not mcp_main:
-        logger.warning("MCP server main.py not found. MCP tools will not be available.")
-        logger.warning(f"Searched paths: {mcp_server_paths}")
+    if not search_server:
+        logger.warning("MCP search server not found. Search tools will not be available.")
+        logger.warning(f"Searched paths: {search_server_paths}")
+        logger.info("You can still use the LLM without MCP tools.")
         return None
     
-    # Find config file
-    if not config_path:
-        config_paths = [
-            mcp_main.parent / "config.toml",
-            project_root / "AgentDock" / "agentdock-node-explore" / "config.toml",
-        ]
-        for path in config_paths:
-            if path.exists():
-                config_path = str(path)
-                break
-    
-    if not config_path:
-        logger.warning("MCP config file not found.")
-        return None
-    
-    logger.info(f"Starting MCP server from: {mcp_main}")
-    logger.info(f"Using config: {config_path}")
+    logger.info(f"Starting MCP search server from: {search_server}")
     
     try:
-        # Set environment and start MCP server
-        env = os.environ.copy()
-        env["CONFIG_FILE_PATH"] = config_path
-        
         # Create log file for MCP server output
         mcp_log_path = script_dir / "mcp_server.log"
         mcp_log = open(mcp_log_path, "w")
         
+        # Start the search server in HTTP mode
         process = subprocess.Popen(
-            ["python", "-m", "uvicorn", "main:app", "--host", "0.0.0.0", "--port", str(port)],
-            cwd=str(mcp_main.parent),
-            env=env,
+            ["python", str(search_server), "--http", "--host", "0.0.0.0", "--port", str(port)],
+            cwd=str(search_server.parent),
             stdout=mcp_log,
             stderr=subprocess.STDOUT
         )
@@ -579,20 +595,26 @@ def start_mcp_server(config_path: str = None, port: int = 8000):
         time.sleep(3)
         
         if process.poll() is None:
-            logger.info(f"MCP server started on port {port}")
+            logger.info(f"MCP search server started on port {port}")
             logger.info(f"MCP server logs: {mcp_log_path}")
+            logger.info("Available tools: search, fetch_url (web browsing)")
             return process
         else:
             # Read log file to get error details
             mcp_log.close()
             with open(mcp_log_path, "r") as f:
                 error_log = f.read()
-            logger.error(f"MCP server failed to start. Log output:\n{error_log}")
+            logger.error(f"MCP search server failed to start. Log output:\n{error_log}")
+            logger.info("Tip: Install required packages with: pip install mcp tiktoken httpx pydantic")
             return None
             
     except Exception as e:
         logger.error(f"Failed to start MCP server: {e}")
         return None
+
+
+# Global variable to store MCP server logs
+mcp_server_log_path = None
 
 
 def main():
