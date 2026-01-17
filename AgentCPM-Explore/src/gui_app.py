@@ -503,16 +503,115 @@ def create_gui() -> gr.Blocks:
     return demo
 
 
+def start_mcp_server(config_path: str = None, port: int = 8000):
+    """
+    Start the MCP server in a subprocess.
+    
+    Args:
+        config_path: Path to MCP config file
+        port: Port to run MCP server on
+    
+    Returns:
+        subprocess.Popen or None
+    """
+    import subprocess
+    import time
+    
+    # Find the MCP server main.py
+    mcp_server_paths = [
+        project_root / "AgentDock" / "agentdock-node-explore" / "main.py",
+        project_root / "AgentDock" / "node" / "main.py",
+        script_dir.parent / "AgentDock" / "agentdock-node-explore" / "main.py",
+    ]
+    
+    mcp_main = None
+    for path in mcp_server_paths:
+        if path.exists():
+            mcp_main = path
+            break
+    
+    if not mcp_main:
+        logger.warning("MCP server main.py not found. MCP tools will not be available.")
+        logger.warning(f"Searched paths: {mcp_server_paths}")
+        return None
+    
+    # Find config file
+    if not config_path:
+        config_paths = [
+            mcp_main.parent / "config.toml",
+            project_root / "AgentDock" / "agentdock-node-explore" / "config.toml",
+        ]
+        for path in config_paths:
+            if path.exists():
+                config_path = str(path)
+                break
+    
+    if not config_path:
+        logger.warning("MCP config file not found.")
+        return None
+    
+    logger.info(f"Starting MCP server from: {mcp_main}")
+    logger.info(f"Using config: {config_path}")
+    
+    try:
+        # Set environment and start MCP server
+        env = os.environ.copy()
+        env["CONFIG_FILE_PATH"] = config_path
+        
+        process = subprocess.Popen(
+            ["python", "-m", "uvicorn", "main:app", "--host", "0.0.0.0", "--port", str(port)],
+            cwd=str(mcp_main.parent),
+            env=env,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE
+        )
+        
+        # Wait a bit for server to start
+        time.sleep(3)
+        
+        if process.poll() is None:
+            logger.info(f"MCP server started on port {port}")
+            return process
+        else:
+            logger.error("MCP server failed to start")
+            return None
+            
+    except Exception as e:
+        logger.error(f"Failed to start MCP server: {e}")
+        return None
+
+
 def main():
     """Main entry point for the GUI application."""
     import argparse
+    import atexit
     
     parser = argparse.ArgumentParser(description="AgentCPM-MCP GUI Application")
     parser.add_argument("--host", default="0.0.0.0", help="Host to bind to")
     parser.add_argument("--port", type=int, default=12000, help="Port to run on")
+    parser.add_argument("--mcp-port", type=int, default=8000, help="Port for MCP server")
     parser.add_argument("--share", action="store_true", help="Create a public link")
+    parser.add_argument("--no-browser", action="store_true", help="Don't auto-open browser")
+    parser.add_argument("--no-mcp", action="store_true", help="Don't auto-start MCP server")
     
     args = parser.parse_args()
+    
+    mcp_process = None
+    
+    # Auto-start MCP server
+    if not args.no_mcp:
+        logger.info("Attempting to start MCP server...")
+        mcp_process = start_mcp_server(port=args.mcp_port)
+        
+        if mcp_process:
+            # Register cleanup on exit
+            def cleanup_mcp():
+                if mcp_process and mcp_process.poll() is None:
+                    logger.info("Shutting down MCP server...")
+                    mcp_process.terminate()
+                    mcp_process.wait(timeout=5)
+            
+            atexit.register(cleanup_mcp)
     
     logger.info(f"Starting AgentCPM-MCP GUI on {args.host}:{args.port}")
     
@@ -521,7 +620,8 @@ def main():
         server_name=args.host,
         server_port=args.port,
         share=args.share,
-        show_error=True
+        show_error=True,
+        inbrowser=not args.no_browser  # Auto-open browser
     )
 
 
