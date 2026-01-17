@@ -413,10 +413,14 @@ def create_gui() -> gr.Blocks:
             with gr.Column(scale=2):
                 gr.Markdown("### 💬 Conversation")
                 
+                # Default prompt
+                default_prompt = "Find a current business niche based on trends and demands from reddit analysis with low competition and entry costs, high demand and bill. Validate it, analyse competitions and build MVP code"
+                
                 # Input area
                 with gr.Row():
                     prompt_input = gr.Textbox(
                         label="Your Prompt",
+                        value=default_prompt,
                         placeholder="Enter your question or request...",
                         lines=3,
                         scale=4
@@ -432,11 +436,12 @@ def create_gui() -> gr.Blocks:
                     interactive=False
                 )
                 
-                # Combined output display
-                gr.Markdown("### 📋 Output")
+                # Combined output display with better height
+                gr.Markdown("### 📋 Output (Input → Thinking → Tool Calls → Response → Logs)")
                 output_display = gr.Markdown(
-                    value="*Output will appear here showing: Input → Thinking → Tool Calls → Response*",
-                    elem_id="output-display"
+                    value="*Click Send to start processing...*",
+                    elem_id="output-display",
+                    height=500
                 )
         
         # Event handlers
@@ -462,8 +467,8 @@ def create_gui() -> gr.Blocks:
             # Reset the client so new settings take effect
             agent.current_client = None
             return (
-                "",  # prompt
-                "*Output will appear here showing: Input → Thinking → Tool Calls → Response*",
+                default_prompt,  # Reset to default prompt
+                "*Click Send to start processing...*",
                 "Ready"
             )
         
@@ -558,12 +563,16 @@ def start_mcp_server(config_path: str = None, port: int = 8000):
         env = os.environ.copy()
         env["CONFIG_FILE_PATH"] = config_path
         
+        # Create log file for MCP server output
+        mcp_log_path = script_dir / "mcp_server.log"
+        mcp_log = open(mcp_log_path, "w")
+        
         process = subprocess.Popen(
             ["python", "-m", "uvicorn", "main:app", "--host", "0.0.0.0", "--port", str(port)],
             cwd=str(mcp_main.parent),
             env=env,
-            stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE
+            stdout=mcp_log,
+            stderr=subprocess.STDOUT
         )
         
         # Wait a bit for server to start
@@ -571,9 +580,14 @@ def start_mcp_server(config_path: str = None, port: int = 8000):
         
         if process.poll() is None:
             logger.info(f"MCP server started on port {port}")
+            logger.info(f"MCP server logs: {mcp_log_path}")
             return process
         else:
-            logger.error("MCP server failed to start")
+            # Read log file to get error details
+            mcp_log.close()
+            with open(mcp_log_path, "r") as f:
+                error_log = f.read()
+            logger.error(f"MCP server failed to start. Log output:\n{error_log}")
             return None
             
     except Exception as e:
