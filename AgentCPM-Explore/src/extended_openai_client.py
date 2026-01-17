@@ -48,7 +48,9 @@ class ExtendedOpenAIClient(BaseLLMClient):
                  tool_end_tag: Optional[str]):
         
         self.model = model
-        self.api_key = api_key or os.getenv("OPENAI_API_KEY")
+        # For Ollama (localhost:11434), use a dummy API key since it's not required
+        is_ollama = base_url and "localhost:11434" in base_url
+        self.api_key = api_key or os.getenv("OPENAI_API_KEY") or ("ollama" if is_ollama else None)
         if not self.api_key:
             raise ValueError(f"Model '{model}' has no OPENAI_API_KEY environment variable set or api_key parameter provided")
         
@@ -421,3 +423,49 @@ class LLMClientManager:
     def get_client(self, client_name: str) -> Optional[BaseLLMClient]:
         """Gets a previously created client."""
         return self._clients.get(client_name)
+
+
+# Model configuration constants for Ollama local deployment
+MODEL_NAME = "deepseek-r1-1.5b"
+BASE_URL = "http://localhost:11434/v1"
+
+
+def get_extended_llm_client(
+    provider: str = "openai",
+    model: str = MODEL_NAME,
+    api_key: Optional[str] = None,
+    base_url: Optional[str] = BASE_URL,
+    timeout: float = 1800.0,
+    tool_start_tag: Optional[str] = None,
+    tool_end_tag: Optional[str] = None
+) -> BaseLLMClient:
+    """
+    Factory function to create an LLM client instance.
+    
+    Defaults to using a local deepseek model via Ollama.
+    
+    Args:
+        provider: LLM provider ("openai" or "ollama")
+        model: Model name (default: deepseek-r1-1.5b)
+        api_key: API key (not required for Ollama)
+        base_url: API base URL (default: Ollama localhost)
+        timeout: Request timeout in seconds
+        tool_start_tag: Tag to identify start of tool calls in response
+        tool_end_tag: Tag to identify end of tool calls in response
+    
+    Returns:
+        BaseLLMClient: An LLM client instance
+    """
+    if provider == "openai":
+        return ExtendedOpenAIClient(
+            model=model,
+            api_key=api_key,
+            base_url=base_url,
+            timeout=timeout,
+            tool_start_tag=tool_start_tag,
+            tool_end_tag=tool_end_tag
+        )
+    elif provider == "ollama":
+        return OllamaLLMClient(model=model)
+    else:
+        raise ValueError(f"Unsupported provider: {provider}")

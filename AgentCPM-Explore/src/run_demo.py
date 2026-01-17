@@ -128,9 +128,9 @@ def main():
     
     # LLM configuration
     parser.add_argument("--provider", default="openai", help="LLM provider (openai, ollama, etc.)")
-    parser.add_argument("--model", default="gpt-4o-mini", help="Model name to use")
+    parser.add_argument("--model", default="deepseek-r1-1.5b", help="Model name to use")
     parser.add_argument("--api-key", help="API Key (uses env var by default)")
-    parser.add_argument("--base-url", help="API BASE URL (uses standard URL by default)")
+    parser.add_argument("--base-url", default="http://localhost:11434/v1", help="API BASE URL (uses standard URL by default)")
     
     args = parser.parse_args()
     

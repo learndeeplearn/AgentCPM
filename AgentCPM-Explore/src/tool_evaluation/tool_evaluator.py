@@ -44,9 +44,9 @@ class ToolEvaluator:
         self,
         manager_url: str = "http://localhost:8000/mcpapi",
         provider: str = "openai",
-        model: str = "gpt-4o-mini",
+        model: str = "deepseek-r1-1.5b",
         api_key: Optional[str] = None,
-        base_url: Optional[str] = None,
+        base_url: Optional[str] = "http://localhost:11434/v1",
         results_dir: str = None,
         log_level: str = "INFO",
     ):
