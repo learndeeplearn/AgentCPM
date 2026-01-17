@@ -100,10 +100,15 @@ class OllamaClient:
             timeout: Request timeout in seconds
         """
         self.model = model
-        self.base_url = base_url.rstrip("/")
+        
+        # Clean up base URL - remove /v1 suffix if present (that's for OpenAI-compatible API)
+        base_url = base_url.rstrip("/")
+        if base_url.endswith("/v1"):
+            base_url = base_url[:-3]
+        self.base_url = base_url
         self.timeout = timeout
         
-        logger.info(f"Initialized Ollama client: model={model}, url={base_url}")
+        logger.info(f"Initialized Ollama client: model={model}, url={self.base_url}")
     
     def create_completion(
         self,

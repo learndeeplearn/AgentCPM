@@ -423,12 +423,12 @@ def create_gui() -> gr.Blocks:
                     model_input = gr.Textbox(
                         label="Model Name",
                         value="deepseek-r1:1.5b",
-                        placeholder="e.g., gpt-4o-mini, deepseek-r1:1.5b"
+                        placeholder="e.g., deepseek-r1:1.5b, llama3, mistral"
                     )
                     base_url_input = gr.Textbox(
-                        label="Base URL",
-                        value="http://localhost:11434/v1",
-                        placeholder="Leave empty for OpenAI, or http://localhost:11434/v1 for Ollama"
+                        label="Ollama URL",
+                        value="http://localhost:11434",
+                        placeholder="Ollama server URL (default: http://localhost:11434)"
                     )
                 
                 with gr.Accordion("Generation Settings", open=True):
