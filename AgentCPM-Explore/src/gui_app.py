@@ -403,27 +403,20 @@ class AgentGUI:
                     break
                 
                 # Process thinking/reasoning
+                # ORIGINAL CODE: Does NOT extract "Thinking..." from content
+                # The full response including "Thinking..." is kept in content
+                # Only uses separate thought field when LLM explicitly returns it (like DeepSeek <think> tags)
                 thinking_text = result.get("thought", "")
                 raw_response = result.get("response", "")
-                
-                # Extract thinking from response if not explicit
-                if not thinking_text and raw_response:
-                    extracted_thinking, cleaned_response = extract_thinking_from_response(raw_response)
-                    if extracted_thinking:
-                        thinking_text = extracted_thinking
-                        result["response"] = cleaned_response
-                        raw_response = cleaned_response
                 
                 # Log this step - ORIGINAL FORMAT: Show full raw response (not extracted thinking)
                 # Original code shows: "Thinking...\n[reasoning]\n...done thinking.\n\n[response]"
                 step_info = f"**Step {iteration}:**"
                 
                 # For display, show the FULL response to match original output format
-                # Don't extract/truncate - show what model actually outputs
+                # ORIGINAL CODE: Does NOT truncate - shows complete model response
                 if raw_response:
-                    # Keep more of the response visible (original shows full thinking)
-                    display_content = raw_response[:4000] + "\n..." if len(raw_response) > 4000 else raw_response
-                    all_thinking.append(f"{step_info}\n{display_content}")
+                    all_thinking.append(f"{step_info}\n{raw_response}")
                     current_status = f"🧠 Step {iteration}: Model responding..."
                     yield (build_output(input_text=input_text, thinking_text="\n\n".join(all_thinking), 
                                        logs_text=logs_text, status_text=current_status), current_status)
@@ -521,9 +514,8 @@ class AgentGUI:
                                         result_str = f"[Summarized by browser processor]\n{summary_result.get('response', result_str)}"
                                         logger.info(f"Browser processor: Reduced to {len(result_str)} chars")
                             
-                            # Keep more results for analysis
-                            if len(result_str) > 4000:
-                                result_str = result_str[:4000] + "\n... (truncated)"
+                            # Original code does NOT truncate tool results
+                            # max_context_tokens in original is 15000000 (essentially unlimited)
                             
                             iteration_tools.append(f"**Result:**\n```\n{result_str}\n```")
                             
