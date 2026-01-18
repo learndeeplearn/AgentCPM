@@ -442,12 +442,24 @@ class AgentGUI:
                     logger.info(f"✅ Final answer detected at step {iteration}")
                     print(f"[DEBUG] ✅ Final answer found at step {iteration}")
                     print(f"[DEBUG] Final answer content: {final_answer[:200]}...")
+                    
+                    # Build comprehensive final response:
+                    # 1. Include the answer content
+                    # 2. Add summary of key findings from tool calls if any
                     final_response = final_answer
+                    
+                    # If we had tool calls, include a summary of findings
+                    if stats["tool_calls"]:
+                        tool_summary = "\n\n---\n**Research Summary:**\n"
+                        for tc in stats["tool_calls"]:
+                            tool_summary += f"- Used `{tc['name']}` at Step {tc['step']}\n"
+                        final_response = final_answer + tool_summary
+                    
                     all_steps.append(f"Step {iteration}: ✅ Final answer provided")
                     
-                    # Update conversation history
+                    # Update conversation history with full raw response (for context)
                     self.conversation_history.append({"role": "user", "content": prompt})
-                    self.conversation_history.append({"role": "assistant", "content": final_response})
+                    self.conversation_history.append({"role": "assistant", "content": raw_response})
                     
                     # Yield immediately to show final answer (before breaking)
                     current_status = f"✅ Final answer found at step {iteration}"
@@ -925,10 +937,12 @@ You accomplish a given task iteratively, breaking it down into clear steps and w
 9. **After you have verified the answer, output the final answer in the specified format**.
 
 ## Answer Format
-- **Answers should be direct and concise**, preferably using single words, numbers with commas and unit, or brief phrases.
+- **Your final answer MUST synthesize ALL information gathered** from your research and tool calls.
+- **Include specific facts, data, and findings** from tool results in your answer.
+- **Do NOT give generic or vague answers** - include the actual information you found.
 - **Strictly follow the format requirements**, wrapping the final answer in `<answer></answer>` tags.
 
-**Your goal: Minimize unnecessary thinking, act decisively, continuously use tools to gather information, and cross-validate with multiple tools until you can confidently provide the most concise and accurate answer.**
+**Your goal: Use tools to gather REAL information, then provide a comprehensive answer that includes the specific findings from your research. Never give a generic answer that ignores the data you collected.**
 
 # Tools
 
@@ -979,9 +993,11 @@ Or:
 - Call tools to gather REAL data - don't make up information
 - Your tool queries must relate to what the USER asked
 - One tool call per response
-- After tool results, ANALYZE the results and include key facts in your answer
+- After tool results, ANALYZE the results and extract KEY FACTS
 - Only output <answer>...</answer> when you have completed ALL research
-- Your final answer MUST include specific information from tool results""",
+- Your final answer MUST include SPECIFIC INFORMATION from tool results
+- NEVER give generic answers - include actual data, numbers, names, URLs you found
+- Synthesize ALL your research findings into the final answer""",
 
                         "Thinking Agent": """You are a deep thinking research assistant. For each response:
 
