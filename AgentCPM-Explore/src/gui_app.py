@@ -284,8 +284,6 @@ class AgentGUI:
         response_text = ""
         current_status = "🔄 Processing input..."
         
-        add_log("INFO", f"Processing prompt: {prompt[:100]}...")
-        
         # Step 1: Input received
         yield (build_output(input_text=input_text, status_text=current_status), current_status)
         
@@ -312,9 +310,17 @@ class AgentGUI:
         # Add conversation history
         messages.extend(self.conversation_history)
         
-        # Add current user message (original code wraps with "Your task is to answer the user's question: ")
+        # Add current user message (ORIGINAL CODE FORMAT - line 1457 in data_test_copy.py)
+        # Original: self.historyx.add_message({"role": "user", "content": f"Your task is to answer the user's question: {query}"})
         user_message = f"Your task is to answer the user's question: {prompt}"
         messages.append({"role": "user", "content": user_message})
+        
+        # Log the actual message being sent (like original code)
+        add_log("INFO", f"User message: {user_message[:150]}...")
+        
+        # Log RAW initial prompt (original code format)
+        initial_messages_json = json.dumps(messages, indent=2, ensure_ascii=False)
+        add_log("RAW", f"Initial messages to model:\n{initial_messages_json}")
         
         input_text += f"\n\n**Context:** {len(messages)} messages in conversation"
         current_status = "🔄 Preparing request..."
