@@ -47,7 +47,11 @@ logger = logging.getLogger("gui_app")
 def extract_thinking_from_response(response_text: str) -> tuple:
     """
     Extract thinking/reasoning content from response text.
-    DeepSeek models often include <think>...</think> tags.
+    
+    Supports multiple formats:
+    1. <think>...</think> tags (DeepSeek style)
+    2. "Thinking..." ... "...done thinking." format (AgentCPM/quickstart style)
+    3. **Thinking:** sections
     
     Returns: (thinking_content, cleaned_response)
     """
@@ -63,13 +67,51 @@ def extract_thinking_from_response(response_text: str) -> tuple:
     if match:
         thinking = match.group(1).strip()
         cleaned = response_text.replace(match.group(0), "").strip()
+        return thinking, cleaned
     
-    # Pattern 2: **Thinking:** or **Reasoning:** sections
-    if not thinking:
-        section_pattern = re.compile(r'\*\*(Thinking|Reasoning|Analysis):\*\*\s*(.*?)(?=\*\*(?:Answer|Response|Result|Conclusion):\*\*|$)', re.DOTALL | re.IGNORECASE)
-        match = section_pattern.search(response_text)
-        if match:
-            thinking = match.group(2).strip()
+    # Pattern 2: "Thinking..." ... "...done thinking." format (from quickstart.py example)
+    thinking_done_pattern = re.compile(r'Thinking\.\.\.?\s*(.*?)\s*\.\.\.done thinking\.?', re.DOTALL | re.IGNORECASE)
+    match = thinking_done_pattern.search(response_text)
+    if match:
+        thinking = match.group(1).strip()
+        cleaned = response_text.replace(match.group(0), "").strip()
+        return thinking, cleaned
+    
+    # Pattern 3: Just starts with "Thinking..." (model thinking out loud)
+    if response_text.strip().lower().startswith("thinking"):
+        # Find where the actual response/conclusion begins
+        lines = response_text.split('\n')
+        thinking_lines = []
+        response_lines = []
+        found_response = False
+        
+        for i, line in enumerate(lines):
+            line_lower = line.strip().lower()
+            
+            # Check for markers that indicate end of thinking
+            if any(marker in line_lower for marker in [
+                'done thinking', '...done', 'conclusion:', 'to find', 'to identify',
+                'the ideal', 'the niche', 'sustainable', 'in summary', 'here\'s why',
+                '### high demand', '### low', '### building', '<answer>'
+            ]):
+                found_response = True
+            
+            if not found_response and i < len(lines) - 3:  # Keep some context
+                thinking_lines.append(line)
+            else:
+                response_lines.append(line)
+        
+        if thinking_lines and len(thinking_lines) > 1:
+            thinking = '\n'.join(thinking_lines)
+            cleaned = '\n'.join(response_lines).strip()
+            return thinking, cleaned
+    
+    # Pattern 4: **Thinking:** or **Reasoning:** sections
+    section_pattern = re.compile(r'\*\*(Thinking|Reasoning|Analysis):\*\*\s*(.*?)(?=\*\*(?:Answer|Response|Result|Conclusion):\*\*|$)', re.DOTALL | re.IGNORECASE)
+    match = section_pattern.search(response_text)
+    if match:
+        thinking = match.group(2).strip()
+        return thinking, cleaned
     
     return thinking, cleaned
 
@@ -268,6 +310,9 @@ class AgentGUI:
                 yield (build_output(input_text=input_text, status_text=current_status), current_status)
         
         # Agent loop - iterate until <answer> tags found or max iterations
+        import time
+        start_time = time.time()
+        
         all_thinking = []
         all_tool_calls = []
         all_steps = []  # Track all steps/subtasks
@@ -276,6 +321,16 @@ class AgentGUI:
         iteration = 0
         consecutive_no_tool = 0
         MAX_NO_TOOL = 3  # Max consecutive responses without tool calls before forcing
+        
+        # Stats tracking
+        stats = {
+            "tool_calls": [],
+            "total_tool_calls": 0,
+            "execution_time": 0,
+            "interactions": 0,
+            "max_interactions_reached": False,
+            "total_tokens": 0
+        }
         
         try:
             while iteration < max_iterations:
@@ -336,6 +391,11 @@ class AgentGUI:
                     self.conversation_history.append({"role": "user", "content": prompt})
                     self.conversation_history.append({"role": "assistant", "content": final_response})
                     break
+                
+                # Track usage/tokens
+                usage = result.get("usage", {})
+                if usage:
+                    stats["total_tokens"] += usage.get("total_tokens", 0)
                 
                 # Check for tool calls
                 tool_calls = result.get("tool_calls", [])
@@ -398,6 +458,15 @@ Continue with the next step of your plan."""
                             current_status = f"✅ Step {iteration}: {func_name} completed"
                             all_steps.append(f"Step {iteration}: ✅ {func_name} returned results")
                             
+                            # Track tool call in stats
+                            stats["tool_calls"].append({
+                                "name": func_name,
+                                "arguments": func_args,
+                                "step": iteration,
+                                "status": "success"
+                            })
+                            stats["total_tool_calls"] += 1
+                            
                         except Exception as e:
                             error_str = str(e)
                             iteration_tools.append(f"**Error:** {error_str}")
@@ -408,6 +477,16 @@ Continue with the next step of your plan."""
                             })
                             current_status = f"⚠️ Step {iteration}: {func_name} failed"
                             all_steps.append(f"Step {iteration}: ❌ {func_name} failed: {error_str[:50]}")
+                            
+                            # Track failed tool call
+                            stats["tool_calls"].append({
+                                "name": func_name,
+                                "arguments": func_args_str,
+                                "step": iteration,
+                                "status": "error",
+                                "error": error_str[:100]
+                            })
+                            stats["total_tool_calls"] += 1
                         
                         logs_text = collect_logs()
                         yield (build_output(input_text=input_text, thinking_text="\n\n".join(all_thinking), 
@@ -485,15 +564,38 @@ You MUST do one of these now."""
             # Loop ended - either by answer or max iterations
             logs_text = collect_logs()
             
+            # Finalize stats
+            stats["execution_time"] = round(time.time() - start_time, 2)
+            stats["interactions"] = iteration
+            stats["max_interactions_reached"] = (iteration >= max_iterations and not final_answer)
+            
+            # Build stats display
+            stats_display = f"""
+---
+### 📊 Execution Statistics
+
+| Metric | Value |
+|--------|-------|
+| **Execution Time** | {stats['execution_time']}s |
+| **Interactions** | {stats['interactions']} |
+| **Tool Calls** | {stats['total_tool_calls']} |
+| **Max Iterations Reached** | {stats['max_interactions_reached']} |
+| **Total Tokens** | {stats['total_tokens'] or 'N/A'} |
+"""
+            if stats["tool_calls"]:
+                stats_display += "\n**Tool Call History:**\n"
+                for tc in stats["tool_calls"]:
+                    status_icon = "✅" if tc.get("status") == "success" else "❌"
+                    stats_display += f"- Step {tc['step']}: {status_icon} `{tc['name']}`\n"
+            
             if not final_answer and not final_response:
                 # Max iterations reached without answer
                 final_response = f"Task incomplete after {iteration} steps.\n\n**Steps taken:**\n" + "\n".join(all_steps)
+                final_response += stats_display
                 status = f"⚠️ Max iterations ({max_iterations}) reached without final answer"
             else:
-                status = f"✅ Complete ({iteration} step{'s' if iteration > 1 else ''})"
-                usage = result.get('usage', {}) if result else {}
-                if usage:
-                    status += f" | Tokens: {usage.get('total_tokens', 'N/A')}"
+                final_response = final_response + stats_display
+                status = f"✅ Complete ({iteration} step{'s' if iteration > 1 else ''}) | {stats['execution_time']}s | {stats['total_tool_calls']} tool calls"
             
             yield (build_output(input_text=input_text, thinking_text="\n\n".join(all_thinking),
                                tool_calls_text="\n\n---\n\n".join(all_tool_calls), 
@@ -592,9 +694,26 @@ def create_gui() -> gr.Blocks:
                     )
                 
                 with gr.Accordion("System Prompt", open=False):
-                    system_prompt_input = gr.Textbox(
-                        label="System Prompt",
-                        value="""You are a deep research assistant. You accomplish tasks iteratively, breaking them into clear steps.
+                    # Preset system prompts
+                    SYSTEM_PROMPTS = {
+                        "AgentCPM Original": """You are a deep research assistant. Your core function is to conduct thorough, multi-source investigations into any topic. You must handle both broad, open-domain inquiries and queries within specialized academic fields. For every request, synthesize information from credible, diverse sources to deliver a comprehensive, accurate, and objective response. When you have gathered sufficient information and are ready to provide the definitive response, you must enclose the entire final answer within <answer></answer> tags.
+
+# Tools
+
+You may call one or more functions to assist with the user query. You are provided with functions:
+
+<tools>
+- web_search: Search the internet for information
+- fetch_webpage: Read content from a specific URL
+</tools>
+
+IMPORTANT: ALWAYS adhere to this exact format for tool use:
+For each function call, return a json object with function name and arguments within <tool_call></tool_call> XML tags:
+<tool_call>
+{"name": <function-name>, "arguments": <args-json-object>}
+</tool_call>""",
+
+                        "Step-by-Step Research": """You are a deep research assistant. You accomplish tasks iteratively, breaking them into clear steps.
 
 ## Task Strategy
 1. Analyze the user's request, break it into sub-goals, arrange them logically.
@@ -620,8 +739,47 @@ Or:
 - One tool call per response
 - After tool results, analyze and call another tool if needed
 - Only output <answer>...</answer> when you have completed ALL research""",
-                        lines=10,
-                        placeholder="Enter system prompt..."
+
+                        "Thinking Agent": """You are a deep thinking research assistant. For each response:
+
+1. First, think through the problem step by step (prefix with "Thinking...")
+2. Consider what information you need to gather
+3. Use tools to research: <tool_call>{"name": "web_search", "arguments": {"query": "..."}}</tool_call>
+4. After getting results, think about what you learned (prefix with "Thinking...")
+5. Continue researching until you have enough data
+6. Provide final answer in <answer>YOUR COMPLETE ANSWER</answer> tags
+
+Always show your reasoning process. Think out loud before acting.""",
+
+                        "Minimal": """You are a research assistant with access to web_search and fetch_webpage tools.
+
+Use <tool_call>{"name": "tool_name", "arguments": {...}}</tool_call> to call tools.
+Wrap final answer in <answer>...</answer> tags.""",
+
+                        "Custom": ""
+                    }
+                    
+                    prompt_dropdown = gr.Dropdown(
+                        label="Select Preset Prompt",
+                        choices=list(SYSTEM_PROMPTS.keys()),
+                        value="AgentCPM Original",
+                        interactive=True
+                    )
+                    
+                    system_prompt_input = gr.Textbox(
+                        label="System Prompt (editable)",
+                        value=SYSTEM_PROMPTS["AgentCPM Original"],
+                        lines=12,
+                        placeholder="Enter or modify system prompt..."
+                    )
+                    
+                    def update_prompt(choice):
+                        return SYSTEM_PROMPTS.get(choice, "")
+                    
+                    prompt_dropdown.change(
+                        fn=update_prompt,
+                        inputs=[prompt_dropdown],
+                        outputs=[system_prompt_input]
                     )
             
             # Right column: Main interaction area
