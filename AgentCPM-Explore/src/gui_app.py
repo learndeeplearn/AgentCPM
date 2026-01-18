@@ -197,7 +197,9 @@ class AgentGUI:
         system_prompt: str,
         manager_url: str,
         use_tools: bool,
-        max_iterations: int = 5
+        max_iterations: int = 30,
+        max_consecutive_no_op: int = 3,
+        return_thought: bool = True
     ) -> Generator[tuple, None, None]:
         """
         Process a user prompt and yield step-by-step updates.
@@ -320,7 +322,7 @@ class AgentGUI:
         final_answer = None
         iteration = 0
         consecutive_no_tool = 0
-        MAX_NO_TOOL = 3  # Original: MAX_CONSECUTIVE_NO_OP = 3
+        MAX_NO_TOOL = max_consecutive_no_op  # Original: MAX_CONSECUTIVE_NO_OP = 3
         
         # Stats tracking
         stats = {
@@ -533,7 +535,12 @@ class AgentGUI:
                                    logs_text=logs_text, status_text=current_status), current_status)
                 
                 # Add assistant response to history
-                messages.append({"role": "assistant", "content": raw_response})
+                # Original: if return_thought, wrap thinking in <think> tags (lines 1593-1595)
+                if return_thought and thinking_text:
+                    content_with_thought = f"<think>{thinking_text}</think>\n{raw_response}"
+                    messages.append({"role": "assistant", "content": content_with_thought})
+                else:
+                    messages.append({"role": "assistant", "content": raw_response})
                 
                 # Original code logic (lines 1765-1781):
                 # if consecutive_no_op_count < MAX_CONSECUTIVE_NO_OP: just continue
@@ -765,13 +772,37 @@ def create_gui() -> gr.Blocks:
                 
                 with gr.Accordion("Agent Settings", open=True):
                     max_iterations_slider = gr.Slider(
-                        label="Max Iterations (for complex tasks)",
+                        label="Max Iterations",
                         minimum=5,
                         maximum=100,
                         value=30,
                         step=5,
-                        info="Max interactions before forced synthesis (original default: 30)"
+                        info="MAX_INTERACTIONS - max rounds before forced synthesis (original: 30)"
                     )
+                    
+                    consecutive_no_op_slider = gr.Slider(
+                        label="Max Consecutive No-Op",
+                        minimum=1,
+                        maximum=10,
+                        value=3,
+                        step=1,
+                        info="MAX_CONSECUTIVE_NO_OP - force prompt after N no-ops (original: 3)"
+                    )
+                    
+                    return_thought_checkbox = gr.Checkbox(
+                        label="Return Thought to LLM (RETURN_THOUGHT_TO_LLM)",
+                        value=True,
+                        info="Feed model's thinking back in <think> tags (original: true)"
+                    )
+                    
+                    gr.Markdown("""
+                    **Original Settings Reference:**
+                    - `MAX_INTERACTIONS=30` - Loop limit
+                    - `MAX_CONSECUTIVE_NO_OP=3` - Force prompt after 3 no-ops
+                    - `RETURN_THOUGHT_TO_LLM=true` - Return thinking to model
+                    - `USE_BROWSER_PROCESSOR=true` - Summarize web content (requires processor model)
+                    - `USE_CONTEXT_MANAGER=false` - Context compression (advanced)
+                    """)
                 
                 with gr.Accordion("System Prompt", open=False):
                     # Preset system prompts
@@ -898,14 +929,15 @@ Wrap final answer in <answer>...</answer> tags.""",
                 )
         
         # Event handlers
-        def process_wrapper(prompt, model, base_url, temp, max_tok, max_iter, sys_prompt, mgr_url, use_tools):
+        def process_wrapper(prompt, model, base_url, temp, max_tok, max_iter, max_no_op, return_thought, sys_prompt, mgr_url, use_tools):
             """Wrapper to handle the generator output."""
             if not prompt.strip():
                 yield ("*Please enter a prompt*", "⚠️ Please enter a prompt")
                 return
             
             for result in agent.process_prompt(
-                prompt, model, base_url, temp, max_tok, sys_prompt, mgr_url, use_tools, int(max_iter)
+                prompt, model, base_url, temp, max_tok, sys_prompt, mgr_url, use_tools, 
+                int(max_iter), int(max_no_op), return_thought
             ):
                 yield result
         
@@ -932,6 +964,7 @@ Wrap final answer in <answer>...</answer> tags.""",
             inputs=[
                 prompt_input, model_input, base_url_input,
                 temperature_slider, max_tokens_slider, max_iterations_slider,
+                consecutive_no_op_slider, return_thought_checkbox,
                 system_prompt_input, manager_url_input, use_tools_checkbox
             ],
             outputs=[output_display, status_display]
@@ -942,6 +975,7 @@ Wrap final answer in <answer>...</answer> tags.""",
             inputs=[
                 prompt_input, model_input, base_url_input,
                 temperature_slider, max_tokens_slider, max_iterations_slider,
+                consecutive_no_op_slider, return_thought_checkbox,
                 system_prompt_input, manager_url_input, use_tools_checkbox
             ],
             outputs=[output_display, status_display]
