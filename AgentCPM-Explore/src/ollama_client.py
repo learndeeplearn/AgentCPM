@@ -205,28 +205,19 @@ class OllamaClient:
                     system_msg = msg
                     break
             
-            tool_prompt = f"""# Available Tools
+            tool_prompt = f"""# Tools
 
+You may call one or more functions to assist with the user query. You are provided with functions:
+
+<tools>
 {tool_descriptions}
+</tools>
 
-# CRITICAL INSTRUCTIONS
-
-You MUST use tools to research before answering. Do NOT provide a final answer without first using tools.
-
-## Step 1: Think about what information you need
-## Step 2: Use a tool to search for information:
+IMPORTANT: ALWAYS adhere to this exact format for tool use:
+For each function call, return a json object with function name and arguments within <tool_call></tool_call> XML tags:
 <tool_call>
-{{"name": "web_search", "arguments": {{"query": "your search query"}}}}
-</tool_call>
-
-## Step 3: After receiving results, analyze them
-## Step 4: Use more tools if needed
-## Step 5: ONLY after gathering real data, provide answer in <answer></answer> tags
-
-# IMPORTANT
-- You MUST call web_search or fetch_webpage BEFORE providing any answer
-- Do NOT use <answer> tags until you have actually used tools and received results
-- Think step by step, use tools, then answer"""
+{{"name": <function-name>, "arguments": <args-json-object>}}
+</tool_call>"""
 
             if system_msg:
                 system_msg["content"] = tool_prompt + "\n\n" + system_msg["content"]
@@ -277,11 +268,32 @@ You MUST use tools to research before answering. Do NOT provide a final answer w
         message = result.get("message", {})
         content = message.get("content", "")
         
+        # DEBUG: Print raw content
+        logger.info(f"[OLLAMA RAW] Content length: {len(content)}")
+        logger.info(f"[OLLAMA RAW] Content (first 500 chars): {content[:500]}")
+        print(f"[OLLAMA RAW] Content length: {len(content)}")
+        print(f"[OLLAMA RAW] First 500 chars:\n{content[:500]}")
+        
         # Extract thinking/reasoning
         thought, cleaned_content = extract_thinking(content)
         
+        logger.info(f"[OLLAMA] Extracted thought length: {len(thought) if thought else 0}")
+        logger.info(f"[OLLAMA] Cleaned content length: {len(cleaned_content)}")
+        print(f"[OLLAMA] Thought extracted: {len(thought) if thought else 0} chars")
+        print(f"[OLLAMA] Cleaned content: {len(cleaned_content)} chars")
+        
         # Parse tool calls from response
         tool_calls, _ = parse_tool_calls(cleaned_content)
+        
+        logger.info(f"[OLLAMA] Tool calls found: {len(tool_calls) if tool_calls else 0}")
+        print(f"[OLLAMA] Tool calls found: {len(tool_calls) if tool_calls else 0}")
+        if tool_calls:
+            for tc in tool_calls:
+                print(f"[OLLAMA] Tool: {tc.get('function', {}).get('name')}")
+        
+        # Check for answer tags
+        has_answer = '<answer>' in content.lower() or '</answer>' in content.lower()
+        print(f"[OLLAMA] Has <answer> tags: {has_answer}")
         
         # Build response
         return {
