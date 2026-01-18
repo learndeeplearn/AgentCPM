@@ -277,8 +277,9 @@ class AgentGUI:
         # Add conversation history
         messages.extend(self.conversation_history)
         
-        # Add current user message
-        messages.append({"role": "user", "content": prompt})
+        # Add current user message (original code wraps with "Your task is to answer the user's question: ")
+        user_message = f"Your task is to answer the user's question: {prompt}"
+        messages.append({"role": "user", "content": user_message})
         
         input_text += f"\n\n**Context:** {len(messages)} messages in conversation"
         current_status = "🔄 Preparing request..."
@@ -944,9 +945,11 @@ For each function call, return a json object with function name and arguments wi
 {"name": <function-name>, "arguments": <args-json-object>}
 </tool_call>
 
-Example of correct tool call:
+CRITICAL: Your tool call arguments MUST be based on the USER'S QUESTION, not from examples. Analyze what the user is asking and construct an appropriate search query.
+
+Example format (DO NOT copy the query - use user's actual question):
 <tool_call>
-{"name": "web_search", "arguments": {"query": "current weather in Beijing"}}
+{"name": "web_search", "arguments": {"query": "<construct query from user's question>"}}
 </tool_call>""",
 
                         "Step-by-Step Research": """You are a deep research assistant. You accomplish tasks iteratively, breaking them into clear steps.
@@ -960,21 +963,25 @@ Example of correct tool call:
 6. When ready to give final answer, wrap it in <answer>YOUR ANSWER</answer> tags.
 
 ## Tool Usage
+CRITICAL: Your search query MUST be based on the USER'S QUESTION, not copied from examples.
+
 To call a tool, use this XML format:
 <tool_call>
-{"name": "web_search", "arguments": {"query": "your search"}}
+{"name": "web_search", "arguments": {"query": "<your query based on user's question>"}}
 </tool_call>
 
 Or:
 <tool_call>
-{"name": "fetch_webpage", "arguments": {"url": "https://example.com"}}
+{"name": "fetch_webpage", "arguments": {"url": "<URL from search results>"}}
 </tool_call>
 
 ## Important Rules
 - Call tools to gather REAL data - don't make up information
+- Your tool queries must relate to what the USER asked
 - One tool call per response
-- After tool results, analyze and call another tool if needed
-- Only output <answer>...</answer> when you have completed ALL research""",
+- After tool results, ANALYZE the results and include key facts in your answer
+- Only output <answer>...</answer> when you have completed ALL research
+- Your final answer MUST include specific information from tool results""",
 
                         "Thinking Agent": """You are a deep thinking research assistant. For each response:
 

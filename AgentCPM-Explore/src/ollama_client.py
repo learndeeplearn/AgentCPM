@@ -115,16 +115,20 @@ def extract_answer(text: str) -> Optional[str]:
     Extract final answer from <answer>...</answer> tags.
     
     Returns the answer content or None if no answer tags found.
+    Skips empty answer tags and finds the first non-empty one.
     """
     if not text:
         return None
     
-    # Pattern for <answer>...</answer>
+    # Pattern for <answer>...</answer> - find ALL matches
     answer_pattern = re.compile(r'<answer>(.*?)</answer>', re.DOTALL | re.IGNORECASE)
-    match = answer_pattern.search(text)
+    matches = answer_pattern.findall(text)
     
-    if match:
-        return match.group(1).strip()
+    # Find the first NON-EMPTY answer (model sometimes outputs empty <answer></answer> first)
+    for match in matches:
+        content = match.strip()
+        if content and len(content) > 10:  # Must have meaningful content
+            return content
     
     return None
 
