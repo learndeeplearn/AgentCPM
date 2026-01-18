@@ -202,7 +202,8 @@ class AgentGUI:
         return_thought: bool = True,
         use_browser_processor: bool = False,
         use_context_manager: bool = False,
-        max_context_tokens: int = 15000
+        max_context_tokens: int = 15000,
+        log_settings: dict = None
     ) -> Generator[tuple, None, None]:
         """
         Process a user prompt and yield step-by-step updates.
@@ -212,8 +213,13 @@ class AgentGUI:
         self.step_counter = 1
         output_parts = []
         logs_accumulated = []
+        raw_output_logs = []  # Store raw output in JSON format like original code
         
-        def build_output(input_text="", thinking_text="", tool_calls_text="", response_text="", logs_text="", status_text=""):
+        # Default log settings
+        if log_settings is None:
+            log_settings = {"raw_output": True, "tool_calls": True, "errors": True, "debug": False}
+        
+        def build_output(input_text="", thinking_text="", tool_calls_text="", response_text="", logs_text="", status_text="", raw_output_text=""):
             """Build combined output from all sections."""
             sections = []
             
@@ -232,6 +238,10 @@ class AgentGUI:
             
             if response_text:
                 sections.append(f"### 💬 FINAL RESPONSE\n\n{response_text}")
+            
+            # Raw output section (like original code format)
+            if raw_output_text:
+                sections.append(f"### 📄 RAW OUTPUT (Original Format)\n\n{raw_output_text}")
             
             if logs_text:
                 sections.append(f"### 📋 LOGS\n\n```\n{logs_text}\n```")
@@ -408,6 +418,22 @@ class AgentGUI:
                 # Only uses separate thought field when LLM explicitly returns it (like DeepSeek <think> tags)
                 thinking_text = result.get("thought", "")
                 raw_response = result.get("response", "")
+                tool_calls = result.get("tool_calls", None)
+                
+                # Log raw output in original format (like data_test_copy.py)
+                if log_settings.get("raw_output"):
+                    raw_message = {
+                        "role": "assistant",
+                        "content": raw_response
+                    }
+                    if thinking_text:
+                        raw_message["thought"] = thinking_text
+                    if tool_calls:
+                        raw_message["tool_calls"] = tool_calls
+                    
+                    # Format as JSON like original code output
+                    raw_json = json.dumps(raw_message, indent=2, ensure_ascii=False)
+                    raw_output_logs.append(f"**Step {iteration} Response:**\n```json\n{raw_json}\n```")
                 
                 # Log this step - ORIGINAL FORMAT: Show full raw response (not extracted thinking)
                 # Original code shows: "Thinking...\n[reasoning]\n...done thinking.\n\n[response]"
@@ -418,8 +444,10 @@ class AgentGUI:
                 if raw_response:
                     all_thinking.append(f"{step_info}\n{raw_response}")
                     current_status = f"🧠 Step {iteration}: Model responding..."
+                    raw_output_text = "\n\n".join(raw_output_logs) if log_settings.get("raw_output") else ""
                     yield (build_output(input_text=input_text, thinking_text="\n\n".join(all_thinking), 
-                                       logs_text=logs_text, status_text=current_status), current_status)
+                                       logs_text=logs_text, status_text=current_status,
+                                       raw_output_text=raw_output_text), current_status)
                 
                 # Check for final answer in response
                 final_answer = extract_answer(raw_response)
@@ -445,10 +473,12 @@ class AgentGUI:
                     
                     # Yield immediately to show final answer (before breaking)
                     current_status = f"✅ Final answer found at step {iteration}"
+                    raw_output_text = "\n\n".join(raw_output_logs) if log_settings.get("raw_output") else ""
                     yield (build_output(input_text=input_text, thinking_text="\n\n".join(all_thinking),
                                        tool_calls_text="\n\n---\n\n".join(all_tool_calls),
                                        response_text=final_response,
-                                       logs_text=logs_text, status_text=current_status), current_status)
+                                       logs_text=logs_text, status_text=current_status,
+                                       raw_output_text=raw_output_text), current_status)
                     break
                 
                 # Track usage/tokens
@@ -746,10 +776,12 @@ class AgentGUI:
                 status = f"✅ Complete ({iteration} step{'s' if iteration > 1 else ''}) | {stats['execution_time']}s | {stats['total_tool_calls']} tool calls"
             
             print(f"[DEBUG] Yielding final output with status: {status}")
+            raw_output_text = "\n\n".join(raw_output_logs) if log_settings.get("raw_output") else ""
             yield (build_output(input_text=input_text, thinking_text="\n\n".join(all_thinking),
                                tool_calls_text="\n\n---\n\n".join(all_tool_calls), 
                                response_text=final_response,
-                               logs_text=logs_text, status_text=status), status)
+                               logs_text=logs_text, status_text=status,
+                               raw_output_text=raw_output_text), status)
             print(f"[DEBUG] Final output yielded successfully")
             
         except Exception as e:
@@ -758,9 +790,11 @@ class AgentGUI:
             logs_text = collect_logs()
             logs_text += f"\n\n**Exception:** {error_msg}"
             current_status = f"❌ Error: {error_msg[:80]}"
+            raw_output_text = "\n\n".join(raw_output_logs) if log_settings.get("raw_output") else ""
             yield (build_output(input_text=input_text, thinking_text="\n\n".join(all_thinking),
                                tool_calls_text="\n\n---\n\n".join(all_tool_calls), 
-                               logs_text=logs_text, status_text=current_status), current_status)
+                               logs_text=logs_text, status_text=current_status,
+                               raw_output_text=raw_output_text), current_status)
 
 
 def create_gui() -> gr.Blocks:
@@ -887,11 +921,39 @@ def create_gui() -> gr.Blocks:
                         outputs=[max_context_tokens_slider]
                     )
                     
+                with gr.Accordion("Logging Settings", open=False):
+                    gr.Markdown("**Select which logs to display:**")
+                    
+                    log_raw_output_checkbox = gr.Checkbox(
+                        label="Log Raw Output (JSON)",
+                        value=True,
+                        info="Show full assistant messages in original JSON format"
+                    )
+                    
+                    log_tool_calls_checkbox = gr.Checkbox(
+                        label="Log Tool Calls",
+                        value=True,
+                        info="Show tool call requests and results"
+                    )
+                    
+                    log_errors_checkbox = gr.Checkbox(
+                        label="Log Errors",
+                        value=True,
+                        info="Show error messages"
+                    )
+                    
+                    log_debug_checkbox = gr.Checkbox(
+                        label="Log Debug Info",
+                        value=False,
+                        info="Show detailed debug information"
+                    )
+                    
                     gr.Markdown("""
                     **Notes:**
-                    - **USE_BROWSER_PROCESSOR**: Uses same Ollama model to summarize long web pages
-                    - **USE_CONTEXT_MANAGER**: Compresses conversation when tokens exceed limit
-                    - Both use the configured model (no separate processor model needed for local Ollama)
+                    - **Raw Output**: Shows messages like original code: `{"role": "assistant", "content": "Thinking..."}`
+                    - **Tool Calls**: Shows function calls and their results
+                    - **Errors**: Shows any errors that occur
+                    - **Debug**: Shows internal state and processing details
                     """)
                 
                 with gr.Accordion("System Prompt", open=False):
@@ -1021,16 +1083,26 @@ Wrap final answer in <answer>...</answer> tags.""",
         # Event handlers
         def process_wrapper(prompt, model, base_url, temp, max_tok, max_iter, max_no_op, 
                            return_thought, use_browser_proc, use_ctx_mgr, max_ctx_tokens,
-                           sys_prompt, mgr_url, use_tools):
+                           sys_prompt, mgr_url, use_tools,
+                           log_raw, log_tools, log_errors, log_debug):
             """Wrapper to handle the generator output."""
             if not prompt.strip():
                 yield ("*Please enter a prompt*", "⚠️ Please enter a prompt")
                 return
             
+            # Pack logging settings
+            log_settings = {
+                "raw_output": log_raw,
+                "tool_calls": log_tools,
+                "errors": log_errors,
+                "debug": log_debug
+            }
+            
             for result in agent.process_prompt(
                 prompt, model, base_url, temp, max_tok, sys_prompt, mgr_url, use_tools, 
                 int(max_iter), int(max_no_op), return_thought,
-                use_browser_proc, use_ctx_mgr, int(max_ctx_tokens)
+                use_browser_proc, use_ctx_mgr, int(max_ctx_tokens),
+                log_settings=log_settings
             ):
                 yield result
         
@@ -1059,7 +1131,8 @@ Wrap final answer in <answer>...</answer> tags.""",
                 temperature_slider, max_tokens_slider, max_iterations_slider,
                 consecutive_no_op_slider, return_thought_checkbox,
                 use_browser_processor_checkbox, use_context_manager_checkbox, max_context_tokens_slider,
-                system_prompt_input, manager_url_input, use_tools_checkbox
+                system_prompt_input, manager_url_input, use_tools_checkbox,
+                log_raw_output_checkbox, log_tool_calls_checkbox, log_errors_checkbox, log_debug_checkbox
             ],
             outputs=[output_display, status_display]
         )
@@ -1071,7 +1144,8 @@ Wrap final answer in <answer>...</answer> tags.""",
                 temperature_slider, max_tokens_slider, max_iterations_slider,
                 consecutive_no_op_slider, return_thought_checkbox,
                 use_browser_processor_checkbox, use_context_manager_checkbox, max_context_tokens_slider,
-                system_prompt_input, manager_url_input, use_tools_checkbox
+                system_prompt_input, manager_url_input, use_tools_checkbox,
+                log_raw_output_checkbox, log_tool_calls_checkbox, log_errors_checkbox, log_debug_checkbox
             ],
             outputs=[output_display, status_display]
         )
