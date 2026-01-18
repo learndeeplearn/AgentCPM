@@ -436,12 +436,20 @@ class AgentGUI:
                     # Original logic: if <answer> found, we're done
                     logger.info(f"✅ Final answer detected at step {iteration}")
                     print(f"[DEBUG] ✅ Final answer found at step {iteration}")
+                    print(f"[DEBUG] Final answer content: {final_answer[:200]}...")
                     final_response = final_answer
                     all_steps.append(f"Step {iteration}: ✅ Final answer provided")
                     
                     # Update conversation history
                     self.conversation_history.append({"role": "user", "content": prompt})
                     self.conversation_history.append({"role": "assistant", "content": final_response})
+                    
+                    # Yield immediately to show final answer (before breaking)
+                    current_status = f"✅ Final answer found at step {iteration}"
+                    yield (build_output(input_text=input_text, thinking_text="\n\n".join(all_thinking),
+                                       tool_calls_text="\n\n---\n\n".join(all_tool_calls),
+                                       response_text=final_response,
+                                       logs_text=logs_text, status_text=current_status), current_status)
                     break
                 
                 # Track usage/tokens
@@ -733,6 +741,9 @@ class AgentGUI:
                 # Still no response - shouldn't happen but handle it
                 final_response = f"No final answer generated after {iteration} steps.\n\n**Steps taken:**\n" + "\n".join(all_steps)
             
+            print(f"[DEBUG] Building final output with response length: {len(final_response)}")
+            print(f"[DEBUG] Final response preview: {final_response[:300]}...")
+            
             final_response = final_response + stats_display
             
             if max_iterations_reached:
@@ -740,10 +751,12 @@ class AgentGUI:
             else:
                 status = f"✅ Complete ({iteration} step{'s' if iteration > 1 else ''}) | {stats['execution_time']}s | {stats['total_tool_calls']} tool calls"
             
+            print(f"[DEBUG] Yielding final output with status: {status}")
             yield (build_output(input_text=input_text, thinking_text="\n\n".join(all_thinking),
                                tool_calls_text="\n\n---\n\n".join(all_tool_calls), 
                                response_text=final_response,
                                logs_text=logs_text, status_text=status), status)
+            print(f"[DEBUG] Final output yielded successfully")
             
         except Exception as e:
             error_msg = f"Error during agent loop: {str(e)}"
