@@ -320,7 +320,7 @@ class AgentGUI:
         final_answer = None
         iteration = 0
         consecutive_no_tool = 0
-        MAX_NO_TOOL = 3  # Max consecutive responses without tool calls before forcing
+        MAX_NO_TOOL = 4  # Max consecutive responses without tool calls before forcing (like original)
         
         # Stats tracking
         stats = {
@@ -329,7 +329,8 @@ class AgentGUI:
             "execution_time": 0,
             "interactions": 0,
             "max_interactions_reached": False,
-            "total_tokens": 0
+            "total_tokens": 0,
+            "thinking_iterations": 0
         }
         
         try:
@@ -499,67 +500,46 @@ Continue with the next step of your plan."""
                     # Continue to next iteration
                     continue
                 
-                # No tool calls and no answer - model might be stuck
+                # No tool calls and no answer - model is thinking/reasoning
+                # This is NORMAL - like the original code, the model may iterate multiple times
                 consecutive_no_tool += 1
-                all_steps.append(f"Step {iteration}: ⚠️ No tool call or answer")
+                stats["thinking_iterations"] += 1
                 
-                # Check if model is describing tool usage
-                describes_tools = any(phrase in raw_response.lower() for phrase in [
-                    "web_search", "fetch_webpage", "search for", "let me search", 
-                    "i will search", "i would search", "we can search", "tool_call"
-                ])
+                # Add this iteration's reasoning to thinking display
+                if raw_response:
+                    # Show full response as thinking for this iteration
+                    display_response = raw_response[:2000] + "..." if len(raw_response) > 2000 else raw_response
+                    all_thinking.append(f"**Iteration {iteration} (Thinking):**\n{display_response}")
+                    all_steps.append(f"Step {iteration}: 🧠 Reasoning/thinking")
                 
-                if describes_tools and consecutive_no_tool < MAX_NO_TOOL:
-                    # Model is describing but not calling - prompt it to actually call
-                    all_thinking.append(f"**Step {iteration} (prompting tool use):**\n{raw_response[:300]}...")
-                    
-                    messages.append({"role": "assistant", "content": raw_response})
+                current_status = f"🧠 Step {iteration}: Model reasoning... (no tool call yet)"
+                yield (build_output(input_text=input_text, thinking_text="\n\n".join(all_thinking),
+                                   tool_calls_text="\n\n---\n\n".join(all_tool_calls),
+                                   logs_text=logs_text, status_text=current_status), current_status)
+                
+                # Add assistant response to history
+                messages.append({"role": "assistant", "content": raw_response})
+                
+                # Check how many consecutive iterations without tool/answer
+                if consecutive_no_tool >= MAX_NO_TOOL:
+                    # Force the model to provide a final answer (like original code)
                     messages.append({
-                        "role": "user",
-                        "content": """You mentioned using tools but didn't actually call them.
-
-To call a tool, use this EXACT format:
-<tool_call>
-{"name": "web_search", "arguments": {"query": "your search query"}}
-</tool_call>
-
-Please make the tool call now. Output the <tool_call> block."""
+                        "role": "system",
+                        "content": "You have repeatedly failed to produce a tool call or a final answer. Do NOT make any tool calls. Provide your best-guess final answer NOW, strictly wrapped in <answer></answer> tags."
                     })
+                    all_steps.append(f"Step {iteration}: ⚠️ System forcing final answer")
                     
-                    current_status = f"🔄 Step {iteration}: Prompting for tool call..."
+                    current_status = f"⚠️ Step {iteration}: Forcing final answer after {consecutive_no_tool} reasoning iterations..."
                     yield (build_output(input_text=input_text, thinking_text="\n\n".join(all_thinking),
                                        tool_calls_text="\n\n---\n\n".join(all_tool_calls),
                                        logs_text=logs_text, status_text=current_status), current_status)
-                    continue
-                
-                elif consecutive_no_tool >= MAX_NO_TOOL:
-                    # Force the model to provide an answer
-                    messages.append({"role": "assistant", "content": raw_response})
-                    messages.append({
-                        "role": "user",
-                        "content": """You have not used tools or provided a final answer for several turns.
-
-Please either:
-1. Make a tool call using: <tool_call>{"name": "web_search", "arguments": {"query": "..."}}</tool_call>
-2. OR provide your final answer using: <answer>YOUR COMPLETE ANSWER HERE</answer>
-
-You MUST do one of these now."""
-                    })
-                    
-                    current_status = f"⚠️ Step {iteration}: Forcing tool call or answer..."
-                    yield (build_output(input_text=input_text, thinking_text="\n\n".join(all_thinking),
-                                       tool_calls_text="\n\n---\n\n".join(all_tool_calls),
-                                       logs_text=logs_text, status_text=current_status), current_status)
-                    continue
-                
                 else:
-                    # Model provided a response but no tools/answer - add to context and continue
-                    messages.append({"role": "assistant", "content": raw_response})
-                    messages.append({
-                        "role": "user",
-                        "content": "Please continue with your plan. Use <tool_call> to search for information, or <answer> to provide your final response."
-                    })
-                    continue
+                    # Let the model continue thinking - don't add any prompt
+                    # Just continue to next iteration (model sees its own previous response)
+                    all_steps.append(f"Step {iteration}: Continuing to next iteration...")
+                
+                # Continue to next iteration
+                continue
             
             # Loop ended - either by answer or max iterations
             logs_text = collect_logs()
@@ -577,7 +557,8 @@ You MUST do one of these now."""
 | Metric | Value |
 |--------|-------|
 | **Execution Time** | {stats['execution_time']}s |
-| **Interactions** | {stats['interactions']} |
+| **Total Interactions** | {stats['interactions']} |
+| **Thinking Iterations** | {stats['thinking_iterations']} |
 | **Tool Calls** | {stats['total_tool_calls']} |
 | **Max Iterations Reached** | {stats['max_interactions_reached']} |
 | **Total Tokens** | {stats['total_tokens'] or 'N/A'} |
