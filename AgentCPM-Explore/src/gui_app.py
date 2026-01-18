@@ -561,13 +561,65 @@ Continue with the next step of your plan."""
                 # Continue to next iteration
                 continue
             
-            # Loop ended - either by answer or max iterations
+            # Loop ended - check if we need forced final answer (like original code)
             logs_text = collect_logs()
+            max_iterations_reached = (iteration >= max_iterations)
+            
+            # ORIGINAL CODE BEHAVIOR: If max iterations reached without answer, make ONE MORE call
+            if max_iterations_reached and not final_answer:
+                logger.warning(f"Maximum iterations reached ({max_iterations}), but no answer found. Forcing model summarization.")
+                print(f"[DEBUG] ⚠️ MAX ITERATIONS REACHED - Forcing final summarization...")
+                
+                current_status = f"⚠️ Max iterations reached - Forcing final answer..."
+                yield (build_output(input_text=input_text, thinking_text="\n\n".join(all_thinking),
+                                   tool_calls_text="\n\n---\n\n".join(all_tool_calls),
+                                   logs_text=logs_text, status_text=current_status), current_status)
+                
+                # Add force answer prompt (exactly like original)
+                force_answer_prompt = (
+                    "You have now reached the maximum interaction limit. "
+                    "You MUST stop making tool calls. "
+                    "Based on all the information you have gathered so far, "
+                    "you must synthesize and provide what you consider the most likely answer "
+                    "in the required format: <answer>your answer</answer>"
+                )
+                
+                messages.append({"role": "system", "content": force_answer_prompt})
+                all_steps.append(f"Step {iteration + 1}: 🔴 System forcing final synthesis")
+                
+                # Make ONE MORE LLM call for final synthesis
+                final_result = self.current_client.create_completion(
+                    messages=messages,
+                    tools=None,  # No tools for final synthesis
+                    stream=True,
+                    temperature=temperature,
+                    max_tokens=max_tokens if max_tokens > 0 else None
+                )
+                
+                if not final_result.get("error"):
+                    final_content = final_result.get("response", "")
+                    
+                    # Try to extract answer from forced response
+                    forced_answer = extract_answer(final_content)
+                    if forced_answer:
+                        final_response = forced_answer
+                        logger.info("Forced synthesis produced <answer> tags")
+                        print(f"[DEBUG] ✅ Forced synthesis produced answer")
+                    else:
+                        # Use the whole response as answer
+                        final_response = final_content
+                        logger.info("Forced synthesis did not produce <answer> tags, using full response")
+                        print(f"[DEBUG] Using full forced response as answer")
+                    
+                    all_thinking.append(f"**Forced Final Synthesis:**\n{final_content[:1000]}...")
+                    iteration += 1  # Count this as an iteration
+                else:
+                    final_response = f"Failed to generate final synthesis: {final_result.get('error')}"
             
             # Finalize stats
             stats["execution_time"] = round(time.time() - start_time, 2)
             stats["interactions"] = iteration
-            stats["max_interactions_reached"] = (iteration >= max_iterations and not final_answer)
+            stats["max_interactions_reached"] = max_iterations_reached
             
             # Build stats display
             stats_display = f"""
@@ -589,13 +641,15 @@ Continue with the next step of your plan."""
                     status_icon = "✅" if tc.get("status") == "success" else "❌"
                     stats_display += f"- Step {tc['step']}: {status_icon} `{tc['name']}`\n"
             
-            if not final_answer and not final_response:
-                # Max iterations reached without answer
-                final_response = f"Task incomplete after {iteration} steps.\n\n**Steps taken:**\n" + "\n".join(all_steps)
-                final_response += stats_display
-                status = f"⚠️ Max iterations ({max_iterations}) reached without final answer"
+            if not final_response:
+                # Still no response - shouldn't happen but handle it
+                final_response = f"No final answer generated after {iteration} steps.\n\n**Steps taken:**\n" + "\n".join(all_steps)
+            
+            final_response = final_response + stats_display
+            
+            if max_iterations_reached:
+                status = f"⚠️ Completed via forced synthesis ({iteration} steps) | {stats['execution_time']}s"
             else:
-                final_response = final_response + stats_display
                 status = f"✅ Complete ({iteration} step{'s' if iteration > 1 else ''}) | {stats['execution_time']}s | {stats['total_tool_calls']} tool calls"
             
             yield (build_output(input_text=input_text, thinking_text="\n\n".join(all_thinking),
@@ -687,11 +741,11 @@ def create_gui() -> gr.Blocks:
                 with gr.Accordion("Agent Settings", open=True):
                     max_iterations_slider = gr.Slider(
                         label="Max Iterations (for complex tasks)",
-                        minimum=1,
-                        maximum=30,
-                        value=15,
-                        step=1,
-                        info="How many think→tool→think cycles (more = deeper research)"
+                        minimum=5,
+                        maximum=100,
+                        value=30,
+                        step=5,
+                        info="Max interactions before forced synthesis (original default: 30)"
                     )
                 
                 with gr.Accordion("System Prompt", open=False):
