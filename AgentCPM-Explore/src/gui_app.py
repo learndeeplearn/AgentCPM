@@ -199,7 +199,10 @@ class AgentGUI:
         use_tools: bool,
         max_iterations: int = 30,
         max_consecutive_no_op: int = 3,
-        return_thought: bool = True
+        return_thought: bool = True,
+        use_browser_processor: bool = False,
+        use_context_manager: bool = False,
+        max_context_tokens: int = 15000
     ) -> Generator[tuple, None, None]:
         """
         Process a user prompt and yield step-by-step updates.
@@ -323,6 +326,7 @@ class AgentGUI:
         iteration = 0
         consecutive_no_tool = 0
         MAX_NO_TOOL = max_consecutive_no_op  # Original: MAX_CONSECUTIVE_NO_OP = 3
+        context_tokens = 0  # Track token count for context manager
         
         # Stats tracking
         stats = {
@@ -332,8 +336,14 @@ class AgentGUI:
             "interactions": 0,
             "max_interactions_reached": False,
             "total_tokens": 0,
-            "thinking_iterations": 0
+            "thinking_iterations": 0,
+            "context_compressions": 0
         }
+        
+        # Log active settings
+        logger.info(f"Agent settings: MAX_ITERATIONS={max_iterations}, MAX_NO_OP={max_consecutive_no_op}, "
+                   f"RETURN_THOUGHT={return_thought}, BROWSER_PROCESSOR={use_browser_processor}, "
+                   f"CONTEXT_MANAGER={use_context_manager}, MAX_CTX_TOKENS={max_context_tokens}")
         
         try:
             while iteration < max_iterations:
@@ -341,6 +351,32 @@ class AgentGUI:
                 current_status = f"🔄 Step {iteration}/{max_iterations}: Analyzing task..."
                 logger.info(f"Starting iteration {iteration}/{max_iterations}")
                 print(f"[DEBUG] === ITERATION {iteration}/{max_iterations} ===")
+                
+                # USE_CONTEXT_MANAGER: Check if context exceeds limit (original lines 1473-1525)
+                if use_context_manager and context_tokens > max_context_tokens:
+                    logger.warning(f"Context manager: {context_tokens} tokens exceeds {max_context_tokens}, compressing...")
+                    current_status = f"🗜️ Step {iteration}: Compressing context ({context_tokens} tokens)..."
+                    yield (build_output(input_text=input_text, thinking_text="\n\n".join(all_thinking),
+                                       tool_calls_text="\n\n---\n\n".join(all_tool_calls), status_text=current_status), current_status)
+                    
+                    # Simple compression: Keep system prompt, first user message, and last N messages
+                    if len(messages) > 6:
+                        compressed = [messages[0]]  # System prompt
+                        if len(messages) > 1:
+                            compressed.append(messages[1])  # First user message
+                        # Add summary of middle messages
+                        middle_count = len(messages) - 6
+                        compressed.append({
+                            "role": "system",
+                            "content": f"[Context compressed: {middle_count} earlier messages summarized to save tokens]"
+                        })
+                        # Keep last 4 messages
+                        compressed.extend(messages[-4:])
+                        messages = compressed
+                        context_tokens = max_context_tokens // 2  # Reset estimate
+                        stats["context_compressions"] += 1
+                        logger.info(f"Context manager: Compressed to {len(messages)} messages")
+                
                 yield (build_output(input_text=input_text, thinking_text="\n\n".join(all_thinking),
                                    tool_calls_text="\n\n---\n\n".join(all_tool_calls), status_text=current_status), current_status)
                 
@@ -454,11 +490,31 @@ class AgentGUI:
                             loop.close()
                             
                             result_str = json.dumps(tool_result, indent=2, ensure_ascii=False)
+                            
+                            # USE_BROWSER_PROCESSOR: Summarize long web content (original lines 2030-2097)
+                            if use_browser_processor and func_name in ["fetch_webpage", "web_search"]:
+                                if len(result_str) > 2000:
+                                    logger.info(f"Browser processor: Summarizing {len(result_str)} chars from {func_name}")
+                                    summary_prompt = f"Summarize the key information from this {func_name} result that is relevant to answering a question. Be concise but include all important facts, numbers, and details:\n\n{result_str[:8000]}"
+                                    summary_result = self.current_client.create_completion(
+                                        messages=[{"role": "user", "content": summary_prompt}],
+                                        tools=None,
+                                        stream=True,
+                                        temperature=0.3,
+                                        max_tokens=1000
+                                    )
+                                    if not summary_result.get("error"):
+                                        result_str = f"[Summarized by browser processor]\n{summary_result.get('response', result_str)}"
+                                        logger.info(f"Browser processor: Reduced to {len(result_str)} chars")
+                            
                             # Keep more results for analysis
                             if len(result_str) > 4000:
                                 result_str = result_str[:4000] + "\n... (truncated)"
                             
                             iteration_tools.append(f"**Result:**\n```\n{result_str}\n```")
+                            
+                            # Track token usage for context manager
+                            context_tokens += len(result_str) // 4  # Rough estimate
                             
                             # Original format (lines 2152-2154): <tool_response>...</tool_response>
                             messages.append({
@@ -770,38 +826,65 @@ def create_gui() -> gr.Blocks:
                     *Tools are initialized automatically when you send a message with "Enable Tools" checked.*
                     """)
                 
-                with gr.Accordion("Agent Settings", open=True):
+                with gr.Accordion("Agent Settings (Original Flags)", open=True):
                     max_iterations_slider = gr.Slider(
-                        label="Max Iterations",
+                        label="MAX_INTERACTIONS",
                         minimum=5,
                         maximum=100,
                         value=30,
                         step=5,
-                        info="MAX_INTERACTIONS - max rounds before forced synthesis (original: 30)"
+                        info="Max rounds before forced synthesis (original: 30)"
                     )
                     
                     consecutive_no_op_slider = gr.Slider(
-                        label="Max Consecutive No-Op",
+                        label="MAX_CONSECUTIVE_NO_OP",
                         minimum=1,
                         maximum=10,
                         value=3,
                         step=1,
-                        info="MAX_CONSECUTIVE_NO_OP - force prompt after N no-ops (original: 3)"
+                        info="Force prompt after N consecutive no-ops (original: 3)"
                     )
                     
                     return_thought_checkbox = gr.Checkbox(
-                        label="Return Thought to LLM (RETURN_THOUGHT_TO_LLM)",
+                        label="RETURN_THOUGHT_TO_LLM",
                         value=True,
-                        info="Feed model's thinking back in <think> tags (original: true)"
+                        info="Feed model's <think> reasoning back in history (original: true)"
+                    )
+                    
+                    use_browser_processor_checkbox = gr.Checkbox(
+                        label="USE_BROWSER_PROCESSOR",
+                        value=False,
+                        info="Summarize web content with LLM before feeding to agent (original: true)"
+                    )
+                    
+                    use_context_manager_checkbox = gr.Checkbox(
+                        label="USE_CONTEXT_MANAGER",
+                        value=False,
+                        info="Compress history when context exceeds limit (original: false)"
+                    )
+                    
+                    max_context_tokens_slider = gr.Slider(
+                        label="Max Context Tokens (for context manager)",
+                        minimum=4000,
+                        maximum=128000,
+                        value=15000,
+                        step=1000,
+                        info="Trigger compression when exceeded (original: 15000000)",
+                        visible=False  # Only show when context manager enabled
+                    )
+                    
+                    # Toggle visibility of max_context_tokens based on context manager
+                    use_context_manager_checkbox.change(
+                        fn=lambda x: gr.update(visible=x),
+                        inputs=[use_context_manager_checkbox],
+                        outputs=[max_context_tokens_slider]
                     )
                     
                     gr.Markdown("""
-                    **Original Settings Reference:**
-                    - `MAX_INTERACTIONS=30` - Loop limit
-                    - `MAX_CONSECUTIVE_NO_OP=3` - Force prompt after 3 no-ops
-                    - `RETURN_THOUGHT_TO_LLM=true` - Return thinking to model
-                    - `USE_BROWSER_PROCESSOR=true` - Summarize web content (requires processor model)
-                    - `USE_CONTEXT_MANAGER=false` - Context compression (advanced)
+                    **Notes:**
+                    - **USE_BROWSER_PROCESSOR**: Uses same Ollama model to summarize long web pages
+                    - **USE_CONTEXT_MANAGER**: Compresses conversation when tokens exceed limit
+                    - Both use the configured model (no separate processor model needed for local Ollama)
                     """)
                 
                 with gr.Accordion("System Prompt", open=False):
@@ -929,7 +1012,9 @@ Wrap final answer in <answer>...</answer> tags.""",
                 )
         
         # Event handlers
-        def process_wrapper(prompt, model, base_url, temp, max_tok, max_iter, max_no_op, return_thought, sys_prompt, mgr_url, use_tools):
+        def process_wrapper(prompt, model, base_url, temp, max_tok, max_iter, max_no_op, 
+                           return_thought, use_browser_proc, use_ctx_mgr, max_ctx_tokens,
+                           sys_prompt, mgr_url, use_tools):
             """Wrapper to handle the generator output."""
             if not prompt.strip():
                 yield ("*Please enter a prompt*", "⚠️ Please enter a prompt")
@@ -937,7 +1022,8 @@ Wrap final answer in <answer>...</answer> tags.""",
             
             for result in agent.process_prompt(
                 prompt, model, base_url, temp, max_tok, sys_prompt, mgr_url, use_tools, 
-                int(max_iter), int(max_no_op), return_thought
+                int(max_iter), int(max_no_op), return_thought,
+                use_browser_proc, use_ctx_mgr, int(max_ctx_tokens)
             ):
                 yield result
         
@@ -965,6 +1051,7 @@ Wrap final answer in <answer>...</answer> tags.""",
                 prompt_input, model_input, base_url_input,
                 temperature_slider, max_tokens_slider, max_iterations_slider,
                 consecutive_no_op_slider, return_thought_checkbox,
+                use_browser_processor_checkbox, use_context_manager_checkbox, max_context_tokens_slider,
                 system_prompt_input, manager_url_input, use_tools_checkbox
             ],
             outputs=[output_display, status_display]
@@ -976,6 +1063,7 @@ Wrap final answer in <answer>...</answer> tags.""",
                 prompt_input, model_input, base_url_input,
                 temperature_slider, max_tokens_slider, max_iterations_slider,
                 consecutive_no_op_slider, return_thought_checkbox,
+                use_browser_processor_checkbox, use_context_manager_checkbox, max_context_tokens_slider,
                 system_prompt_input, manager_url_input, use_tools_checkbox
             ],
             outputs=[output_display, status_display]
