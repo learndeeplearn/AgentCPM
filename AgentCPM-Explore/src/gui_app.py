@@ -930,15 +930,17 @@ def create_gui() -> gr.Blocks:
                         label="Temperature",
                         minimum=0.0,
                         maximum=2.0,
-                        value=0.0,
-                        step=0.1
+                        value=1.0,  # Original code uses 1.0 for natural "thinking" style
+                        step=0.1,
+                        info="1.0 = natural thinking style (original), 0.0 = deterministic"
                     )
                     max_tokens_slider = gr.Slider(
                         label="Max Tokens (0 = no limit)",
                         minimum=0,
-                        maximum=8192,
-                        value=2048,
-                        step=256
+                        maximum=32768,
+                        value=16384,  # Original code uses 16384
+                        step=1024,
+                        info="Original code uses 16384 for full thinking chains"
                     )
                 
                 with gr.Accordion("Tools Settings", open=True):
