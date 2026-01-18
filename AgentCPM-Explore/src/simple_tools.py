@@ -77,7 +77,36 @@ async def web_search(query: str, num_results: int = 5) -> Dict[str, Any]:
         Dict with search results
     """
     try:
-        # Try using duckduckgo_search library
+        # Try using ddgs library (new package name)
+        try:
+            from ddgs import DDGS
+            
+            with DDGS() as ddgs:
+                results = list(ddgs.text(query, max_results=min(num_results, 10)))
+            
+            formatted_results = []
+            for i, r in enumerate(results, 1):
+                formatted_results.append({
+                    "index": i,
+                    "title": r.get("title", ""),
+                    "url": r.get("href", r.get("link", "")),
+                    "snippet": r.get("body", r.get("snippet", ""))
+                })
+            
+            if formatted_results:
+                return {
+                    "status": "success",
+                    "query": query,
+                    "results": formatted_results,
+                    "count": len(formatted_results)
+                }
+            # If ddgs returned empty, try fallback
+            logger.warning("DDGS returned empty results, trying fallback")
+            
+        except ImportError:
+            logger.warning("ddgs not installed, trying duckduckgo_search")
+            
+        # Try legacy package name
         try:
             from duckduckgo_search import DDGS
             
@@ -93,15 +122,16 @@ async def web_search(query: str, num_results: int = 5) -> Dict[str, Any]:
                     "snippet": r.get("body", r.get("snippet", ""))
                 })
             
-            return {
-                "status": "success",
-                "query": query,
-                "results": formatted_results,
-                "count": len(formatted_results)
-            }
-            
+            if formatted_results:
+                return {
+                    "status": "success",
+                    "query": query,
+                    "results": formatted_results,
+                    "count": len(formatted_results)
+                }
+                
         except ImportError:
-            logger.warning("duckduckgo_search not installed, using fallback")
+            logger.warning("duckduckgo_search not installed, using HTTP fallback")
             
         # Fallback: Use httpx to query DuckDuckGo HTML
         import httpx
