@@ -45,7 +45,9 @@ def parse_tool_calls(text: str, valid_tools: List[str] = None) -> tuple:
     """
     Parse tool calls from response text.
     
-    Only matches our known tools to avoid false positives.
+    Supports multiple formats:
+    1. <tool_call>{"name": "...", "arguments": {...}}</tool_call> (XML tags)
+    2. {"name": "...", "arguments": {...}} (raw JSON)
     
     Args:
         text: Response text to parse
@@ -61,33 +63,70 @@ def parse_tool_calls(text: str, valid_tools: List[str] = None) -> tuple:
     
     tool_calls = []
     
-    # Try to find JSON tool calls - must match known tool names
-    # Pattern: {"name": "tool_name", "arguments": {...}}
-    for tool_name in valid_tools:
-        # Look for exact tool name in JSON format
-        pattern = re.compile(
-            r'\{\s*"name"\s*:\s*"' + re.escape(tool_name) + r'"\s*,\s*"arguments"\s*:\s*(\{[^{}]*\})\s*\}',
-            re.DOTALL
-        )
-        
-        for match in pattern.finditer(text):
-            try:
-                args_str = match.group(1)
-                # Validate it's valid JSON
-                json.loads(args_str)
-                
+    # Method 1: Parse <tool_call>...</tool_call> XML tags (preferred)
+    tool_call_pattern = re.compile(r'<tool_call>\s*(.*?)\s*</tool_call>', re.DOTALL | re.IGNORECASE)
+    
+    for match in tool_call_pattern.finditer(text):
+        try:
+            json_str = match.group(1).strip()
+            parsed = json.loads(json_str)
+            
+            if isinstance(parsed, dict) and parsed.get("name") in valid_tools:
                 tool_calls.append({
                     "id": f"call_{random.randint(10000, 99999)}",
                     "type": "function",
                     "function": {
-                        "name": tool_name,
-                        "arguments": args_str
+                        "name": parsed.get("name"),
+                        "arguments": json.dumps(parsed.get("arguments", {}), ensure_ascii=False)
                     }
                 })
-            except Exception:
-                pass
+        except Exception as e:
+            logging.warning(f"Failed to parse tool_call: {e}")
+    
+    # Method 2: If no XML tags found, try raw JSON format
+    if not tool_calls:
+        for tool_name in valid_tools:
+            pattern = re.compile(
+                r'\{\s*"name"\s*:\s*"' + re.escape(tool_name) + r'"\s*,\s*"arguments"\s*:\s*(\{[^{}]*\})\s*\}',
+                re.DOTALL
+            )
+            
+            for match in pattern.finditer(text):
+                try:
+                    args_str = match.group(1)
+                    json.loads(args_str)  # Validate JSON
+                    
+                    tool_calls.append({
+                        "id": f"call_{random.randint(10000, 99999)}",
+                        "type": "function",
+                        "function": {
+                            "name": tool_name,
+                            "arguments": args_str
+                        }
+                    })
+                except Exception:
+                    pass
     
     return tool_calls, text
+
+
+def extract_answer(text: str) -> Optional[str]:
+    """
+    Extract final answer from <answer>...</answer> tags.
+    
+    Returns the answer content or None if no answer tags found.
+    """
+    if not text:
+        return None
+    
+    # Pattern for <answer>...</answer>
+    answer_pattern = re.compile(r'<answer>(.*?)</answer>', re.DOTALL | re.IGNORECASE)
+    match = answer_pattern.search(text)
+    
+    if match:
+        return match.group(1).strip()
+    
+    return None
 
 
 class OllamaClient:
@@ -166,15 +205,28 @@ class OllamaClient:
                     system_msg = msg
                     break
             
-            tool_prompt = f"""TOOLS AVAILABLE - YOU MUST USE THEM:
+            tool_prompt = f"""# Available Tools
 
 {tool_descriptions}
 
-CRITICAL: To use a tool, output ONLY this JSON (no other text):
-{{"name": "web_search", "arguments": {{"query": "your search"}}}}
+# How to Use Tools
 
-DO NOT describe using tools. Actually OUTPUT the JSON to call them.
-After getting results, analyze them and call more tools if needed."""
+To call a tool, output it in this XML format:
+<tool_call>
+{{"name": "web_search", "arguments": {{"query": "your search query"}}}}
+</tool_call>
+
+# How to Provide Final Answer
+
+When you have gathered enough information, wrap your final answer in:
+<answer>
+Your complete answer here
+</answer>
+
+# Important Rules
+- Make ONE tool call per response
+- After receiving tool results, analyze them and continue
+- Only output <answer> when you have completed ALL research needed"""
 
             if system_msg:
                 system_msg["content"] = tool_prompt + "\n\n" + system_msg["content"]

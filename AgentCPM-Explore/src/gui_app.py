@@ -26,7 +26,7 @@ project_root = script_dir.parent
 sys.path.insert(0, str(project_root))
 sys.path.insert(0, str(script_dir))
 
-from ollama_client import OllamaClient, create_ollama_client
+from ollama_client import OllamaClient, create_ollama_client, extract_answer
 from simple_tools import SimpleToolHandler, SIMPLE_TOOLS
 
 # Configure logging to capture logs for GUI display
@@ -267,16 +267,20 @@ class AgentGUI:
                 current_status = f"🔧 {len(tools)} tools available"
                 yield (build_output(input_text=input_text, status_text=current_status), current_status)
         
-        # Agent loop - iterate until complete or max iterations
+        # Agent loop - iterate until <answer> tags found or max iterations
         all_thinking = []
         all_tool_calls = []
+        all_steps = []  # Track all steps/subtasks
         final_response = ""
+        final_answer = None
         iteration = 0
+        consecutive_no_tool = 0
+        MAX_NO_TOOL = 3  # Max consecutive responses without tool calls before forcing
         
         try:
             while iteration < max_iterations:
                 iteration += 1
-                current_status = f"🔄 Iteration {iteration}/{max_iterations}: Calling LLM..."
+                current_status = f"🔄 Step {iteration}/{max_iterations}: Analyzing task..."
                 yield (build_output(input_text=input_text, thinking_text="\n\n".join(all_thinking),
                                    tool_calls_text="\n\n---\n\n".join(all_tool_calls), status_text=current_status), current_status)
                 
@@ -299,9 +303,6 @@ class AgentGUI:
                                        logs_text=logs_text, status_text=current_status), current_status)
                     break
                 
-                current_status = f"✅ Iteration {iteration}: Response received"
-                yield (build_output(input_text=input_text, logs_text=logs_text, status_text=current_status), current_status)
-                
                 # Process thinking/reasoning
                 thinking_text = result.get("thought", "")
                 raw_response = result.get("response", "")
@@ -314,17 +315,35 @@ class AgentGUI:
                         result["response"] = cleaned_response
                         raw_response = cleaned_response
                 
+                # Log this step
+                step_info = f"**Step {iteration}:**"
                 if thinking_text:
-                    all_thinking.append(f"**Iteration {iteration}:**\n{thinking_text}")
-                    current_status = f"🧠 Iteration {iteration}: Thinking extracted"
+                    # Truncate long thinking for display
+                    display_thinking = thinking_text[:800] + "..." if len(thinking_text) > 800 else thinking_text
+                    all_thinking.append(f"{step_info}\n{display_thinking}")
+                    current_status = f"🧠 Step {iteration}: Reasoning..."
                     yield (build_output(input_text=input_text, thinking_text="\n\n".join(all_thinking), 
                                        logs_text=logs_text, status_text=current_status), current_status)
+                
+                # Check for final answer in response
+                final_answer = extract_answer(raw_response)
+                if final_answer:
+                    logger.info(f"✅ Final answer detected at step {iteration}")
+                    final_response = final_answer
+                    all_steps.append(f"Step {iteration}: ✅ Final answer provided")
+                    
+                    # Update conversation history
+                    self.conversation_history.append({"role": "user", "content": prompt})
+                    self.conversation_history.append({"role": "assistant", "content": final_response})
+                    break
                 
                 # Check for tool calls
                 tool_calls = result.get("tool_calls", [])
                 
                 if tool_calls and self.tool_handler:
+                    consecutive_no_tool = 0  # Reset counter
                     iteration_tools = []
+                    
                     for i, tool_call in enumerate(tool_calls):
                         func_name = tool_call.get("function", {}).get("name", "unknown")
                         func_args_str = tool_call.get("function", {}).get("arguments", "{}")
@@ -334,12 +353,13 @@ class AgentGUI:
                             logger.warning(f"Skipping invalid tool: {func_name}")
                             continue
                         
-                        tool_entry = f"**Tool:** `{func_name}`\n**Arguments:**\n```json\n{func_args_str}\n```"
+                        tool_entry = f"**Tool:** `{func_name}`\n```json\n{func_args_str}\n```"
                         iteration_tools.append(tool_entry)
+                        all_steps.append(f"Step {iteration}: 🔧 Calling {func_name}")
                         
-                        current_status = f"🔧 Iteration {iteration}: Executing {func_name}..."
+                        current_status = f"🔧 Step {iteration}: Executing {func_name}..."
                         yield (build_output(input_text=input_text, thinking_text="\n\n".join(all_thinking), 
-                                           tool_calls_text="\n\n---\n\n".join(all_tool_calls + iteration_tools),
+                                           tool_calls_text="\n\n---\n\n".join(all_tool_calls + [f"**Step {iteration}:**\n" + "\n".join(iteration_tools)]),
                                            logs_text=logs_text, status_text=current_status), current_status)
                         
                         # Execute tool
@@ -353,85 +373,127 @@ class AgentGUI:
                             loop.close()
                             
                             result_str = json.dumps(tool_result, indent=2, ensure_ascii=False)
-                            if len(result_str) > 2000:
-                                result_str = result_str[:2000] + "\n... (truncated)"
+                            # Keep more results for analysis
+                            if len(result_str) > 4000:
+                                result_str = result_str[:4000] + "\n... (truncated)"
                             
-                            iteration_tools.append(f"**Result:**\n```json\n{result_str}\n```")
+                            iteration_tools.append(f"**Result:**\n```\n{result_str}\n```")
                             
                             # Add tool result to messages for next iteration
                             messages.append({"role": "assistant", "content": raw_response})
                             messages.append({
                                 "role": "user", 
-                                "content": f"Tool '{func_name}' returned:\n{result_str}\n\nPlease analyze these results and continue with the task. If you need more information, use another tool. If you have enough information, provide your final answer."
+                                "content": f"""Tool '{func_name}' returned the following results:
+
+{result_str}
+
+Based on these results:
+1. Extract key information relevant to the task
+2. Determine if you need more information (use another tool call)
+3. If you have gathered enough information, provide your final answer wrapped in <answer>YOUR ANSWER</answer> tags
+
+Continue with the next step of your plan."""
                             })
                             
-                            current_status = f"✅ Iteration {iteration}: {func_name} completed"
+                            current_status = f"✅ Step {iteration}: {func_name} completed"
+                            all_steps.append(f"Step {iteration}: ✅ {func_name} returned results")
+                            
                         except Exception as e:
-                            iteration_tools.append(f"**Error:** {str(e)}")
+                            error_str = str(e)
+                            iteration_tools.append(f"**Error:** {error_str}")
                             messages.append({"role": "assistant", "content": raw_response})
                             messages.append({
                                 "role": "user",
-                                "content": f"Tool '{func_name}' failed with error: {str(e)}\n\nPlease try a different approach or provide your best answer based on available information."
+                                "content": f"Tool '{func_name}' failed with error: {error_str}\n\nPlease try a different approach or search query."
                             })
-                            current_status = f"⚠️ Iteration {iteration}: {func_name} failed"
+                            current_status = f"⚠️ Step {iteration}: {func_name} failed"
+                            all_steps.append(f"Step {iteration}: ❌ {func_name} failed: {error_str[:50]}")
                         
                         logs_text = collect_logs()
                         yield (build_output(input_text=input_text, thinking_text="\n\n".join(all_thinking), 
-                                           tool_calls_text="\n\n---\n\n".join(all_tool_calls + iteration_tools),
+                                           tool_calls_text="\n\n---\n\n".join(all_tool_calls + [f"**Step {iteration}:**\n" + "\n".join(iteration_tools)]),
                                            logs_text=logs_text, status_text=current_status), current_status)
                     
                     if iteration_tools:
-                        all_tool_calls.append(f"**Iteration {iteration}:**\n" + "\n".join(iteration_tools))
+                        all_tool_calls.append(f"**Step {iteration}:**\n" + "\n".join(iteration_tools))
                     
-                    # Continue to next iteration to process tool results
+                    # Continue to next iteration
                     continue
                 
-                # No tool calls detected - check if model is describing tool usage instead of calling
-                response_text = result.get("response", "")
+                # No tool calls and no answer - model might be stuck
+                consecutive_no_tool += 1
+                all_steps.append(f"Step {iteration}: ⚠️ No tool call or answer")
                 
-                # Detect if model is describing tool usage without actually calling
-                describes_tools = any(phrase in response_text.lower() for phrase in [
-                    "use web_search", "use fetch_webpage", "call web_search", "call fetch_webpage",
-                    "using web_search", "using fetch_webpage", "i would search", "i will search",
-                    "search for", "let me search", "we can search"
+                # Check if model is describing tool usage
+                describes_tools = any(phrase in raw_response.lower() for phrase in [
+                    "web_search", "fetch_webpage", "search for", "let me search", 
+                    "i will search", "i would search", "we can search", "tool_call"
                 ])
                 
-                if describes_tools and iteration < max_iterations and use_tools:
+                if describes_tools and consecutive_no_tool < MAX_NO_TOOL:
                     # Model is describing but not calling - prompt it to actually call
-                    all_thinking.append(f"**Iteration {iteration} (no tool call detected):**\n{response_text[:500]}...")
+                    all_thinking.append(f"**Step {iteration} (prompting tool use):**\n{raw_response[:300]}...")
                     
-                    messages.append({"role": "assistant", "content": response_text})
+                    messages.append({"role": "assistant", "content": raw_response})
                     messages.append({
                         "role": "user",
-                        "content": """You described using tools but didn't actually call them.
+                        "content": """You mentioned using tools but didn't actually call them.
 
-To ACTUALLY use a tool, you must output ONLY this JSON format:
+To call a tool, use this EXACT format:
+<tool_call>
 {"name": "web_search", "arguments": {"query": "your search query"}}
+</tool_call>
 
-Please call the web_search tool now with a specific search query. Output ONLY the JSON, nothing else."""
+Please make the tool call now. Output the <tool_call> block."""
                     })
                     
-                    current_status = f"🔄 Iteration {iteration}: Model described tools but didn't call - prompting to actually use"
+                    current_status = f"🔄 Step {iteration}: Prompting for tool call..."
                     yield (build_output(input_text=input_text, thinking_text="\n\n".join(all_thinking),
                                        tool_calls_text="\n\n---\n\n".join(all_tool_calls),
                                        logs_text=logs_text, status_text=current_status), current_status)
                     continue
                 
-                # This is truly the final response
-                final_response = response_text
+                elif consecutive_no_tool >= MAX_NO_TOOL:
+                    # Force the model to provide an answer
+                    messages.append({"role": "assistant", "content": raw_response})
+                    messages.append({
+                        "role": "user",
+                        "content": """You have not used tools or provided a final answer for several turns.
+
+Please either:
+1. Make a tool call using: <tool_call>{"name": "web_search", "arguments": {"query": "..."}}</tool_call>
+2. OR provide your final answer using: <answer>YOUR COMPLETE ANSWER HERE</answer>
+
+You MUST do one of these now."""
+                    })
+                    
+                    current_status = f"⚠️ Step {iteration}: Forcing tool call or answer..."
+                    yield (build_output(input_text=input_text, thinking_text="\n\n".join(all_thinking),
+                                       tool_calls_text="\n\n---\n\n".join(all_tool_calls),
+                                       logs_text=logs_text, status_text=current_status), current_status)
+                    continue
                 
-                # Update conversation history
-                self.conversation_history.append({"role": "user", "content": prompt})
-                self.conversation_history.append({"role": "assistant", "content": final_response})
-                
-                break  # Exit loop - we have a final response
+                else:
+                    # Model provided a response but no tools/answer - add to context and continue
+                    messages.append({"role": "assistant", "content": raw_response})
+                    messages.append({
+                        "role": "user",
+                        "content": "Please continue with your plan. Use <tool_call> to search for information, or <answer> to provide your final response."
+                    })
+                    continue
             
-            # Final output
+            # Loop ended - either by answer or max iterations
             logs_text = collect_logs()
-            usage = result.get('usage', {}) if 'result' in dir() else {}
-            status = f"✅ Complete ({iteration} iteration{'s' if iteration > 1 else ''})"
-            if usage:
-                status += f" | Tokens: {usage.get('total_tokens', 'N/A')}"
+            
+            if not final_answer and not final_response:
+                # Max iterations reached without answer
+                final_response = f"Task incomplete after {iteration} steps.\n\n**Steps taken:**\n" + "\n".join(all_steps)
+                status = f"⚠️ Max iterations ({max_iterations}) reached without final answer"
+            else:
+                status = f"✅ Complete ({iteration} step{'s' if iteration > 1 else ''})"
+                usage = result.get('usage', {}) if result else {}
+                if usage:
+                    status += f" | Tokens: {usage.get('total_tokens', 'N/A')}"
             
             yield (build_output(input_text=input_text, thinking_text="\n\n".join(all_thinking),
                                tool_calls_text="\n\n---\n\n".join(all_tool_calls), 
@@ -532,24 +594,33 @@ def create_gui() -> gr.Blocks:
                 with gr.Accordion("System Prompt", open=False):
                     system_prompt_input = gr.Textbox(
                         label="System Prompt",
-                        value="""You are an AI research agent. You MUST use tools to gather real information - do NOT make up answers.
+                        value="""You are a deep research assistant. You accomplish tasks iteratively, breaking them into clear steps.
 
-IMPORTANT: For any research task, you MUST call tools. Do NOT just describe what you would do.
+## Task Strategy
+1. Analyze the user's request, break it into sub-goals, arrange them logically.
+2. Develop a step-by-step plan (1., 2., 3.), each step for a specific sub-goal.
+3. Call ONE tool per step to gather information.
+4. After each tool result, extract key information and plan next step.
+5. Keep iterating until you have enough information.
+6. When ready to give final answer, wrap it in <answer>YOUR ANSWER</answer> tags.
 
-Available tools:
-1. web_search - Search the internet
-2. fetch_webpage - Read a webpage
+## Tool Usage
+To call a tool, use this XML format:
+<tool_call>
+{"name": "web_search", "arguments": {"query": "your search"}}
+</tool_call>
 
-TO CALL A TOOL, output this EXACT JSON format (nothing else):
-{"name": "web_search", "arguments": {"query": "your search query here"}}
+Or:
+<tool_call>
+{"name": "fetch_webpage", "arguments": {"url": "https://example.com"}}
+</tool_call>
 
-Example - if asked about business trends, your FIRST response should be:
-{"name": "web_search", "arguments": {"query": "business trends 2024 low competition high demand"}}
-
-After receiving results, analyze them, then call another tool if needed.
-Keep using tools until you have gathered enough real data to answer.
-Only provide your final answer AFTER using tools to research.""",
-                        lines=8,
+## Important Rules
+- Call tools to gather REAL data - don't make up information
+- One tool call per response
+- After tool results, analyze and call another tool if needed
+- Only output <answer>...</answer> when you have completed ALL research""",
+                        lines=10,
                         placeholder="Enter system prompt..."
                     )
             
