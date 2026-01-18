@@ -386,48 +386,25 @@ class AgentGUI:
                                        logs_text=logs_text, status_text=current_status), current_status)
                 
                 # Check for final answer in response
-                # But ONLY accept answer after at least some iterations OR if tools were used
                 final_answer = extract_answer(raw_response)
                 
-                # Log raw response for debugging
-                logger.info(f"Step {iteration} raw response length: {len(raw_response)}")
+                # Debug: Show first 500 chars of raw response
+                logger.info(f"Step {iteration} raw response (first 500 chars): {raw_response[:500]}")
                 logger.info(f"Step {iteration} has <answer> tags: {final_answer is not None}")
                 print(f"[DEBUG] Step {iteration}: response length={len(raw_response)}, has_answer={final_answer is not None}")
+                print(f"[DEBUG] Step {iteration} response preview: {raw_response[:300]}...")
                 
                 if final_answer:
-                    # Only accept answer if we've done some work OR it's forced
-                    # This prevents model from giving answer without research
-                    if iteration >= 2 or stats["total_tool_calls"] > 0 or consecutive_no_tool >= MAX_NO_TOOL:
-                        logger.info(f"✅ Final answer detected at step {iteration}")
-                        print(f"[DEBUG] ✅ Accepting final answer at step {iteration}")
-                        final_response = final_answer
-                        all_steps.append(f"Step {iteration}: ✅ Final answer provided")
-                        
-                        # Update conversation history
-                        self.conversation_history.append({"role": "user", "content": prompt})
-                        self.conversation_history.append({"role": "assistant", "content": final_response})
-                        break
-                    else:
-                        # Model gave answer too early - treat it as thinking and continue
-                        logger.info(f"⚠️ Model provided answer at step {iteration} but needs more iterations")
-                        print(f"[DEBUG] ⚠️ Answer too early at step {iteration}, continuing...")
-                        
-                        # Add to thinking instead
-                        all_thinking.append(f"**Iteration {iteration} (Early answer, needs research):**\n{raw_response[:1500]}...")
-                        all_steps.append(f"Step {iteration}: ⚠️ Early answer - needs research first")
-                        stats["thinking_iterations"] += 1
-                        
-                        messages.append({"role": "assistant", "content": raw_response})
-                        messages.append({
-                            "role": "user",
-                            "content": "Before providing your final answer, you need to research this topic. Please use the web_search tool to gather real data first. Call the tool like this:\n<tool_call>\n{\"name\": \"web_search\", \"arguments\": {\"query\": \"your search query\"}}\n</tool_call>"
-                        })
-                        
-                        current_status = f"🔄 Step {iteration}: Answer too early - prompting for research..."
-                        yield (build_output(input_text=input_text, thinking_text="\n\n".join(all_thinking),
-                                           tool_calls_text="\n\n---\n\n".join(all_tool_calls),
-                                           logs_text=logs_text, status_text=current_status), current_status)
-                        continue
+                    # Original logic: if <answer> found, we're done
+                    logger.info(f"✅ Final answer detected at step {iteration}")
+                    print(f"[DEBUG] ✅ Final answer found at step {iteration}")
+                    final_response = final_answer
+                    all_steps.append(f"Step {iteration}: ✅ Final answer provided")
+                    
+                    # Update conversation history
+                    self.conversation_history.append({"role": "user", "content": prompt})
+                    self.conversation_history.append({"role": "assistant", "content": final_response})
+                    break
                 
                 # Track usage/tokens
                 usage = result.get("usage", {})

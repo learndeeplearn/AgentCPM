@@ -209,24 +209,24 @@ class OllamaClient:
 
 {tool_descriptions}
 
-# How to Use Tools
+# CRITICAL INSTRUCTIONS
 
-To call a tool, output it in this XML format:
+You MUST use tools to research before answering. Do NOT provide a final answer without first using tools.
+
+## Step 1: Think about what information you need
+## Step 2: Use a tool to search for information:
 <tool_call>
 {{"name": "web_search", "arguments": {{"query": "your search query"}}}}
 </tool_call>
 
-# How to Provide Final Answer
+## Step 3: After receiving results, analyze them
+## Step 4: Use more tools if needed
+## Step 5: ONLY after gathering real data, provide answer in <answer></answer> tags
 
-When you have gathered enough information, wrap your final answer in:
-<answer>
-Your complete answer here
-</answer>
-
-# Important Rules
-- Make ONE tool call per response
-- After receiving tool results, analyze them and continue
-- Only output <answer> when you have completed ALL research needed"""
+# IMPORTANT
+- You MUST call web_search or fetch_webpage BEFORE providing any answer
+- Do NOT use <answer> tags until you have actually used tools and received results
+- Think step by step, use tools, then answer"""
 
             if system_msg:
                 system_msg["content"] = tool_prompt + "\n\n" + system_msg["content"]
