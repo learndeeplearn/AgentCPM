@@ -337,10 +337,13 @@ class AgentGUI:
             while iteration < max_iterations:
                 iteration += 1
                 current_status = f"🔄 Step {iteration}/{max_iterations}: Analyzing task..."
+                logger.info(f"Starting iteration {iteration}/{max_iterations}")
+                print(f"[DEBUG] === ITERATION {iteration}/{max_iterations} ===")
                 yield (build_output(input_text=input_text, thinking_text="\n\n".join(all_thinking),
                                    tool_calls_text="\n\n---\n\n".join(all_tool_calls), status_text=current_status), current_status)
                 
                 # Call LLM
+                print(f"[DEBUG] Calling LLM with {len(messages)} messages...")
                 result = self.current_client.create_completion(
                     messages=messages,
                     tools=tools,
@@ -348,6 +351,7 @@ class AgentGUI:
                     temperature=temperature,
                     max_tokens=max_tokens if max_tokens > 0 else None
                 )
+                print(f"[DEBUG] LLM response received")
                 
                 logs_text = collect_logs()
                 
@@ -382,16 +386,48 @@ class AgentGUI:
                                        logs_text=logs_text, status_text=current_status), current_status)
                 
                 # Check for final answer in response
+                # But ONLY accept answer after at least some iterations OR if tools were used
                 final_answer = extract_answer(raw_response)
+                
+                # Log raw response for debugging
+                logger.info(f"Step {iteration} raw response length: {len(raw_response)}")
+                logger.info(f"Step {iteration} has <answer> tags: {final_answer is not None}")
+                print(f"[DEBUG] Step {iteration}: response length={len(raw_response)}, has_answer={final_answer is not None}")
+                
                 if final_answer:
-                    logger.info(f"✅ Final answer detected at step {iteration}")
-                    final_response = final_answer
-                    all_steps.append(f"Step {iteration}: ✅ Final answer provided")
-                    
-                    # Update conversation history
-                    self.conversation_history.append({"role": "user", "content": prompt})
-                    self.conversation_history.append({"role": "assistant", "content": final_response})
-                    break
+                    # Only accept answer if we've done some work OR it's forced
+                    # This prevents model from giving answer without research
+                    if iteration >= 2 or stats["total_tool_calls"] > 0 or consecutive_no_tool >= MAX_NO_TOOL:
+                        logger.info(f"✅ Final answer detected at step {iteration}")
+                        print(f"[DEBUG] ✅ Accepting final answer at step {iteration}")
+                        final_response = final_answer
+                        all_steps.append(f"Step {iteration}: ✅ Final answer provided")
+                        
+                        # Update conversation history
+                        self.conversation_history.append({"role": "user", "content": prompt})
+                        self.conversation_history.append({"role": "assistant", "content": final_response})
+                        break
+                    else:
+                        # Model gave answer too early - treat it as thinking and continue
+                        logger.info(f"⚠️ Model provided answer at step {iteration} but needs more iterations")
+                        print(f"[DEBUG] ⚠️ Answer too early at step {iteration}, continuing...")
+                        
+                        # Add to thinking instead
+                        all_thinking.append(f"**Iteration {iteration} (Early answer, needs research):**\n{raw_response[:1500]}...")
+                        all_steps.append(f"Step {iteration}: ⚠️ Early answer - needs research first")
+                        stats["thinking_iterations"] += 1
+                        
+                        messages.append({"role": "assistant", "content": raw_response})
+                        messages.append({
+                            "role": "user",
+                            "content": "Before providing your final answer, you need to research this topic. Please use the web_search tool to gather real data first. Call the tool like this:\n<tool_call>\n{\"name\": \"web_search\", \"arguments\": {\"query\": \"your search query\"}}\n</tool_call>"
+                        })
+                        
+                        current_status = f"🔄 Step {iteration}: Answer too early - prompting for research..."
+                        yield (build_output(input_text=input_text, thinking_text="\n\n".join(all_thinking),
+                                           tool_calls_text="\n\n---\n\n".join(all_tool_calls),
+                                           logs_text=logs_text, status_text=current_status), current_status)
+                        continue
                 
                 # Track usage/tokens
                 usage = result.get("usage", {})
@@ -505,14 +541,18 @@ Continue with the next step of your plan."""
                 consecutive_no_tool += 1
                 stats["thinking_iterations"] += 1
                 
+                logger.info(f"Step {iteration}: No tool call or answer - thinking iteration {consecutive_no_tool}/{MAX_NO_TOOL}")
+                print(f"[DEBUG] Step {iteration}: No tool/answer, consecutive_no_tool={consecutive_no_tool}/{MAX_NO_TOOL}")
+                
                 # Add this iteration's reasoning to thinking display
                 if raw_response:
                     # Show full response as thinking for this iteration
                     display_response = raw_response[:2000] + "..." if len(raw_response) > 2000 else raw_response
                     all_thinking.append(f"**Iteration {iteration} (Thinking):**\n{display_response}")
                     all_steps.append(f"Step {iteration}: 🧠 Reasoning/thinking")
+                    print(f"[DEBUG] Added thinking iteration {iteration}, response preview: {raw_response[:200]}...")
                 
-                current_status = f"🧠 Step {iteration}: Model reasoning... (no tool call yet)"
+                current_status = f"🧠 Step {iteration}: Model reasoning... ({consecutive_no_tool}/{MAX_NO_TOOL} before force)"
                 yield (build_output(input_text=input_text, thinking_text="\n\n".join(all_thinking),
                                    tool_calls_text="\n\n---\n\n".join(all_tool_calls),
                                    logs_text=logs_text, status_text=current_status), current_status)
@@ -523,6 +563,8 @@ Continue with the next step of your plan."""
                 # Check how many consecutive iterations without tool/answer
                 if consecutive_no_tool >= MAX_NO_TOOL:
                     # Force the model to provide a final answer (like original code)
+                    logger.info(f"Forcing final answer after {consecutive_no_tool} consecutive no-ops")
+                    print(f"[DEBUG] ⚠️ FORCING FINAL ANSWER after {consecutive_no_tool} no-ops")
                     messages.append({
                         "role": "system",
                         "content": "You have repeatedly failed to produce a tool call or a final answer. Do NOT make any tool calls. Provide your best-guess final answer NOW, strictly wrapped in <answer></answer> tags."
@@ -534,8 +576,9 @@ Continue with the next step of your plan."""
                                        tool_calls_text="\n\n---\n\n".join(all_tool_calls),
                                        logs_text=logs_text, status_text=current_status), current_status)
                 else:
-                    # Let the model continue thinking - don't add any prompt
-                    # Just continue to next iteration (model sees its own previous response)
+                    # Let the model continue thinking
+                    logger.info(f"Continuing to next iteration...")
+                    print(f"[DEBUG] Continuing to iteration {iteration + 1}...")
                     all_steps.append(f"Step {iteration}: Continuing to next iteration...")
                 
                 # Continue to next iteration
