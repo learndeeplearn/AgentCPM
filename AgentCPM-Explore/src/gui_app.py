@@ -320,7 +320,7 @@ class AgentGUI:
         final_answer = None
         iteration = 0
         consecutive_no_tool = 0
-        MAX_NO_TOOL = 4  # Max consecutive responses without tool calls before forcing (like original)
+        MAX_NO_TOOL = 3  # Original: MAX_CONSECUTIVE_NO_OP = 3
         
         # Stats tracking
         stats = {
@@ -537,28 +537,37 @@ Continue with the next step of your plan."""
                 # Add assistant response to history
                 messages.append({"role": "assistant", "content": raw_response})
                 
-                # Check how many consecutive iterations without tool/answer
-                if consecutive_no_tool >= MAX_NO_TOOL:
-                    # Force the model to provide a final answer (like original code)
-                    logger.info(f"Forcing final answer after {consecutive_no_tool} consecutive no-ops")
-                    print(f"[DEBUG] ⚠️ FORCING FINAL ANSWER after {consecutive_no_tool} no-ops")
-                    messages.append({
+                # Original code logic (lines 1765-1781):
+                # if consecutive_no_op_count < MAX_CONSECUTIVE_NO_OP: just continue
+                # else: insert force prompt AND reset count to 0, then continue
+                
+                if consecutive_no_tool < MAX_NO_TOOL:
+                    # Just continue to next iteration, no prompt added
+                    logger.info(f"NO-OP {consecutive_no_tool}/{MAX_NO_TOOL}: continuing to next round")
+                    print(f"[DEBUG] NO-OP {consecutive_no_tool}/{MAX_NO_TOOL}: continuing to next round")
+                    all_steps.append(f"Step {iteration}: NO-OP {consecutive_no_tool}/{MAX_NO_TOOL}, continuing...")
+                else:
+                    # Original: "3rd time: insert system forced answer once"
+                    logger.warning(f"NO-OP has reached threshold ({MAX_NO_TOOL}): inserting forced answer system prompt")
+                    print(f"[DEBUG] ⚠️ NO-OP threshold reached - inserting force prompt")
+                    
+                    # Insert force prompt (exactly like original NO_OP_FORCE_SYSTEM_PROMPT)
+                    force_msg = {
                         "role": "system",
                         "content": "You have repeatedly failed to produce a tool call or a final answer. Do NOT make any tool calls. Provide your best-guess final answer NOW, strictly wrapped in <answer></answer> tags."
-                    })
-                    all_steps.append(f"Step {iteration}: ⚠️ System forcing final answer")
+                    }
+                    messages.append(force_msg)
+                    all_steps.append(f"Step {iteration}: ⚠️ Force prompt inserted")
                     
-                    current_status = f"⚠️ Step {iteration}: Forcing final answer after {consecutive_no_tool} reasoning iterations..."
+                    # CRITICAL: Reset count to avoid immediate re-injection (original line 1780)
+                    consecutive_no_tool = 0
+                    
+                    current_status = f"⚠️ Step {iteration}: Force prompt inserted, continuing..."
                     yield (build_output(input_text=input_text, thinking_text="\n\n".join(all_thinking),
                                        tool_calls_text="\n\n---\n\n".join(all_tool_calls),
                                        logs_text=logs_text, status_text=current_status), current_status)
-                else:
-                    # Let the model continue thinking
-                    logger.info(f"Continuing to next iteration...")
-                    print(f"[DEBUG] Continuing to iteration {iteration + 1}...")
-                    all_steps.append(f"Step {iteration}: Continuing to next iteration...")
                 
-                # Continue to next iteration
+                # Continue to next iteration (original always continues here)
                 continue
             
             # Loop ended - check if we need forced final answer (like original code)
