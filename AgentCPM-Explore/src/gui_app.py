@@ -225,7 +225,7 @@ class AgentGUI:
                 sections.append(f"### 📝 INPUT\n\n{input_text}")
             
             if thinking_text:
-                sections.append(f"### 🧠 THINKING/REASONING\n\n{thinking_text}")
+                sections.append(f"### 🧠 MODEL RESPONSES (Thinking/Reasoning)\n\n{thinking_text}")
             
             if tool_calls_text:
                 sections.append(f"### 🔧 TOOL CALLS\n\n{tool_calls_text}")
@@ -414,13 +414,17 @@ class AgentGUI:
                         result["response"] = cleaned_response
                         raw_response = cleaned_response
                 
-                # Log this step
+                # Log this step - ORIGINAL FORMAT: Show full raw response (not extracted thinking)
+                # Original code shows: "Thinking...\n[reasoning]\n...done thinking.\n\n[response]"
                 step_info = f"**Step {iteration}:**"
-                if thinking_text:
-                    # Truncate long thinking for display
-                    display_thinking = thinking_text[:800] + "..." if len(thinking_text) > 800 else thinking_text
-                    all_thinking.append(f"{step_info}\n{display_thinking}")
-                    current_status = f"🧠 Step {iteration}: Reasoning..."
+                
+                # For display, show the FULL response to match original output format
+                # Don't extract/truncate - show what model actually outputs
+                if raw_response:
+                    # Keep more of the response visible (original shows full thinking)
+                    display_content = raw_response[:4000] + "\n..." if len(raw_response) > 4000 else raw_response
+                    all_thinking.append(f"{step_info}\n{display_content}")
+                    current_status = f"🧠 Step {iteration}: Model responding..."
                     yield (build_output(input_text=input_text, thinking_text="\n\n".join(all_thinking), 
                                        logs_text=logs_text, status_text=current_status), current_status)
                 
@@ -586,13 +590,9 @@ class AgentGUI:
                 logger.info(f"Step {iteration}: No tool call or answer - thinking iteration {consecutive_no_tool}/{MAX_NO_TOOL}")
                 print(f"[DEBUG] Step {iteration}: No tool/answer, consecutive_no_tool={consecutive_no_tool}/{MAX_NO_TOOL}")
                 
-                # Add this iteration's reasoning to thinking display
-                if raw_response:
-                    # Show full response as thinking for this iteration
-                    display_response = raw_response[:2000] + "..." if len(raw_response) > 2000 else raw_response
-                    all_thinking.append(f"**Iteration {iteration} (Thinking):**\n{display_response}")
-                    all_steps.append(f"Step {iteration}: 🧠 Reasoning/thinking")
-                    print(f"[DEBUG] Added thinking iteration {iteration}, response preview: {raw_response[:200]}...")
+                # Response already added to all_thinking above - just update status
+                all_steps.append(f"Step {iteration}: 🧠 Reasoning/thinking")
+                print(f"[DEBUG] Thinking iteration {iteration}, response preview: {raw_response[:200] if raw_response else 'empty'}...")
                 
                 current_status = f"🧠 Step {iteration}: Model reasoning... ({consecutive_no_tool}/{MAX_NO_TOOL} before force)"
                 yield (build_output(input_text=input_text, thinking_text="\n\n".join(all_thinking),
