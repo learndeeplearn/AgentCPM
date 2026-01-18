@@ -303,10 +303,18 @@ class ExtendedOpenAIClient(BaseLLMClient):
                 final_tool_calls = [tool_deltas[k] for k in sorted(tool_deltas.keys())]
                 final_reasoning = "".join(reasoning_content_parts)
 
-                if not final_reasoning:
-                    think_result = self._parse_think_from_text(final_content)
-                    if think_result:
-                        final_reasoning, final_content = think_result 
+                # ORIGINAL CODE BEHAVIOR: Do NOT extract <think> tags from content
+                # Keep the full response including "Thinking..." or <think> tags in content
+                # Only use reasoning_content from API if explicitly provided (DeepSeek API)
+                # The _parse_think_from_text was extracting and REMOVING thinking from content
+                # which differs from original data_test_copy.py behavior
+                
+                # If we have reasoning from API streaming (reasoning_content field), 
+                # prepend it to content in "Thinking...done thinking" format for consistency
+                if final_reasoning and not final_content.startswith("Thinking"):
+                    # Format like original: "Thinking...\n{reasoning}\n...done thinking.\n\n{content}"
+                    final_content = f"Thinking...\n{final_reasoning}\n...done thinking.\n\n{final_content}"
+                    final_reasoning = ""  # Clear since it's now in content
 
                 if not final_tool_calls:
                     parsed_result = self._parse_tool_calls_from_text(final_content)

@@ -768,7 +768,8 @@ class AgentGUI:
                         logger.info("Forced synthesis did not produce <answer> tags, using full response")
                         print(f"[DEBUG] Using full forced response as answer")
                     
-                    all_thinking.append(f"**Forced Final Synthesis:**\n{final_content[:1500]}...")
+                    # ORIGINAL BEHAVIOR: No truncation - show full response
+                    all_thinking.append(f"**Forced Final Synthesis:**\n{final_content}")
                     iteration += 1  # Count this as an iteration
                 else:
                     final_response = f"Failed to generate final synthesis: {final_result.get('error')}"
