@@ -378,6 +378,20 @@ class AgentGUI:
         MAX_NO_TOOL = max_consecutive_no_op  # Original: MAX_CONSECUTIVE_NO_OP = 3
         context_tokens = 0  # Track token count for context manager
         
+        # Patterns for detecting generic/unhelpful filler responses
+        GENERIC_PATTERNS = [
+            "I'm here to provide",
+            "I'm here to help",
+            "Please let me know",
+            "I'd be happy to help",
+            "What would you like",
+            "How can I assist",
+            "What topic or question",
+            "feel free to ask",
+            "Let me know if",
+            "I can help you with",
+        ]
+        
         # Stats tracking
         stats = {
             "tool_calls": [],
@@ -491,7 +505,17 @@ class AgentGUI:
                 final_answer = extract_answer(raw_response)
                 add_log("DEBUG", f"Step {iteration} has <answer> tags: {final_answer is not None}")
                 
+                # Check if answer is generic/unhelpful (model sometimes outputs filler responses)
+                is_generic = False
                 if final_answer:
+                    answer_lower = final_answer.lower()
+                    for pattern in GENERIC_PATTERNS:
+                        if pattern.lower() in answer_lower and len(final_answer) < 500:
+                            is_generic = True
+                            add_log("DEBUG", f"Step {iteration}: Detected generic answer, ignoring")
+                            break
+                
+                if final_answer and not is_generic:
                     # Original logic: if <answer> found, we're done
                     logger.info(f"✅ Final answer detected at step {iteration}")
                     print(f"[DEBUG] ✅ Final answer found at step {iteration}")
@@ -512,6 +536,10 @@ class AgentGUI:
                                        response_text=final_response,
                                        status_text=current_status), current_status)
                     break
+                elif final_answer and is_generic:
+                    # Generic answer detected - continue iterating or use previous good content
+                    add_log("INFO", f"Step {iteration}: Generic answer in <answer> tags ignored, continuing")
+                    all_steps.append(f"Step {iteration}: ⚠️ Generic answer ignored")
                 
                 # Track usage/tokens
                 usage = result.get("usage", {})
@@ -774,13 +802,43 @@ class AgentGUI:
                 else:
                     final_response = f"Failed to generate final synthesis: {final_result.get('error')}"
             
-            # If still no final_response, use the last assistant message
-            if not final_response and last_assistant_content:
-                # Extract answer if present, otherwise use full content
-                extracted = extract_answer(last_assistant_content)
-                final_response = extracted if extracted else last_assistant_content
-                logger.info("Using last assistant message as final response")
-                print(f"[DEBUG] Using last assistant message as final response")
+            # If still no final_response, find the best substantive response from all assistant messages
+            if not final_response:
+                # Look through all assistant messages and find the longest/most substantive one
+                best_response = ""
+                best_length = 0
+                
+                for msg in messages:
+                    if msg.get("role") == "assistant":
+                        content = msg.get("content", "")
+                        # Skip generic responses
+                        is_generic = False
+                        content_lower = content.lower()
+                        for pattern in GENERIC_PATTERNS:
+                            if pattern.lower() in content_lower and len(content) < 500:
+                                is_generic = True
+                                break
+                        
+                        if not is_generic and len(content) > best_length:
+                            # Check if it has an answer tag, extract it
+                            extracted = extract_answer(content)
+                            if extracted and len(extracted) > best_length:
+                                best_response = extracted
+                                best_length = len(extracted)
+                            elif len(content) > best_length:
+                                best_response = content
+                                best_length = len(content)
+                
+                if best_response:
+                    final_response = best_response
+                    add_log("INFO", f"Using best substantive response (length: {best_length})")
+                    logger.info(f"Using best substantive assistant message as final response (length: {best_length})")
+                elif last_assistant_content:
+                    # Fallback to last message if nothing better found
+                    extracted = extract_answer(last_assistant_content)
+                    final_response = extracted if extracted else last_assistant_content
+                    add_log("INFO", "Fallback: Using last assistant message as final response")
+                    logger.info("Fallback: Using last assistant message as final response")
             
             # Finalize stats
             stats["execution_time"] = round(time.time() - start_time, 2)
