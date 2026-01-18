@@ -443,21 +443,10 @@ class AgentGUI:
                     print(f"[DEBUG] ✅ Final answer found at step {iteration}")
                     print(f"[DEBUG] Final answer content: {final_answer[:200]}...")
                     
-                    # Build comprehensive final response:
-                    # 1. Include the answer content
-                    # 2. Add summary of key findings from tool calls if any
                     final_response = final_answer
-                    
-                    # If we had tool calls, include a summary of findings
-                    if stats["tool_calls"]:
-                        tool_summary = "\n\n---\n**Research Summary:**\n"
-                        for tc in stats["tool_calls"]:
-                            tool_summary += f"- Used `{tc['name']}` at Step {tc['step']}\n"
-                        final_response = final_answer + tool_summary
-                    
                     all_steps.append(f"Step {iteration}: ✅ Final answer provided")
                     
-                    # Update conversation history with full raw response (for context)
+                    # Update conversation history
                     self.conversation_history.append({"role": "user", "content": prompt})
                     self.conversation_history.append({"role": "assistant", "content": raw_response})
                     
@@ -918,32 +907,6 @@ def create_gui() -> gr.Blocks:
                     SYSTEM_PROMPTS = {
                         "AgentCPM Original": """You are a deep research assistant. Your core function is to conduct thorough, multi-source investigations into any topic. You must handle both broad, open-domain inquiries and queries within specialized academic fields. For every request, synthesize information from credible, diverse sources to deliver a comprehensive, accurate, and objective response. When you have gathered sufficient information and are ready to provide the definitive response, you must enclose the entire final answer within <answer></answer> tags.
 
-# General Objective
-
-You accomplish a given task iteratively, breaking it down into clear steps and working through them methodically.
-
-## Task Strategy
-
-1. **Analyze the user's request** to clarify the task objective, break it down into clear sub-goals, and arrange them in logical order.
-2. **If the task does not require tool use, think step by step and answer the user directly.**
-3. **If the task requires tool use, develop a concise step-by-step plan** (e.g., 1., 2., 3.), with each step corresponding to a specific sub-goal, obey tool-use guidelines to solve the task.
-
-## Tool-Use Guidelines
-4. **Call only one tool per step**, prioritizing the tool that best advances the current sub-goal.
-5. **After each tool call, stop responding immediately** and wait for user feedback or tool results. Do not assume results or continue analysis.
-6. **Extract and summarize key information from tool results** to inform the next step.
-7. **Adjust your plan promptly when new information or challenges arise**, ensuring all sub-goals are covered and nothing is missed.
-8. **For key conclusions, you must cross-validate using multiple tools or methods** to ensure the accuracy and consistency of the answer.
-9. **After you have verified the answer, output the final answer in the specified format**.
-
-## Answer Format
-- **Your final answer MUST synthesize ALL information gathered** from your research and tool calls.
-- **Include specific facts, data, and findings** from tool results in your answer.
-- **Do NOT give generic or vague answers** - include the actual information you found.
-- **Strictly follow the format requirements**, wrapping the final answer in `<answer></answer>` tags.
-
-**Your goal: Use tools to gather REAL information, then provide a comprehensive answer that includes the specific findings from your research. Never give a generic answer that ignores the data you collected.**
-
 # Tools
 
 You may call one or more functions to assist with the user query. You are provided with functions:
@@ -957,13 +920,6 @@ IMPORTANT: ALWAYS adhere to this exact format for tool use:
 For each function call, return a json object with function name and arguments within <tool_call></tool_call> XML tags:
 <tool_call>
 {"name": <function-name>, "arguments": <args-json-object>}
-</tool_call>
-
-CRITICAL: Your tool call arguments MUST be based on the USER'S QUESTION, not from examples. Analyze what the user is asking and construct an appropriate search query.
-
-Example format (DO NOT copy the query - use user's actual question):
-<tool_call>
-{"name": "web_search", "arguments": {"query": "<construct query from user's question>"}}
 </tool_call>""",
 
                         "Step-by-Step Research": """You are a deep research assistant. You accomplish tasks iteratively, breaking them into clear steps.
@@ -977,27 +933,21 @@ Example format (DO NOT copy the query - use user's actual question):
 6. When ready to give final answer, wrap it in <answer>YOUR ANSWER</answer> tags.
 
 ## Tool Usage
-CRITICAL: Your search query MUST be based on the USER'S QUESTION, not copied from examples.
-
 To call a tool, use this XML format:
 <tool_call>
-{"name": "web_search", "arguments": {"query": "<your query based on user's question>"}}
+{"name": "web_search", "arguments": {"query": "your search query"}}
 </tool_call>
 
 Or:
 <tool_call>
-{"name": "fetch_webpage", "arguments": {"url": "<URL from search results>"}}
+{"name": "fetch_webpage", "arguments": {"url": "https://example.com"}}
 </tool_call>
 
 ## Important Rules
 - Call tools to gather REAL data - don't make up information
-- Your tool queries must relate to what the USER asked
 - One tool call per response
-- After tool results, ANALYZE the results and extract KEY FACTS
-- Only output <answer>...</answer> when you have completed ALL research
-- Your final answer MUST include SPECIFIC INFORMATION from tool results
-- NEVER give generic answers - include actual data, numbers, names, URLs you found
-- Synthesize ALL your research findings into the final answer""",
+- After tool results, analyze and plan next step
+- Only output <answer>...</answer> when you have completed ALL research""",
 
                         "Thinking Agent": """You are a deep thinking research assistant. For each response:
 
