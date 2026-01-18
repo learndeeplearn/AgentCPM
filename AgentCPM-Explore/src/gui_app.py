@@ -565,8 +565,18 @@ Continue with the next step of your plan."""
             logs_text = collect_logs()
             max_iterations_reached = (iteration >= max_iterations)
             
-            # ORIGINAL CODE BEHAVIOR: If max iterations reached without answer, make ONE MORE call
-            if max_iterations_reached and not final_answer:
+            # Check if we have an answer from the last message
+            # Original code: checks last_message_content for <answer> tags
+            last_assistant_content = ""
+            for msg in reversed(messages):
+                if msg.get("role") == "assistant":
+                    last_assistant_content = msg.get("content", "")
+                    break
+            
+            has_answer_in_last = bool(extract_answer(last_assistant_content))
+            
+            # ORIGINAL CODE BEHAVIOR: If max iterations reached AND no answer, make ONE MORE call
+            if max_iterations_reached and not has_answer_in_last and not final_answer:
                 logger.warning(f"Maximum iterations reached ({max_iterations}), but no answer found. Forcing model summarization.")
                 print(f"[DEBUG] ⚠️ MAX ITERATIONS REACHED - Forcing final summarization...")
                 
@@ -575,7 +585,7 @@ Continue with the next step of your plan."""
                                    tool_calls_text="\n\n---\n\n".join(all_tool_calls),
                                    logs_text=logs_text, status_text=current_status), current_status)
                 
-                # Add force answer prompt (exactly like original)
+                # Add force answer prompt (exactly like original code line 2188-2194)
                 force_answer_prompt = (
                     "You have now reached the maximum interaction limit. "
                     "You MUST stop making tool calls. "
@@ -587,7 +597,7 @@ Continue with the next step of your plan."""
                 messages.append({"role": "system", "content": force_answer_prompt})
                 all_steps.append(f"Step {iteration + 1}: 🔴 System forcing final synthesis")
                 
-                # Make ONE MORE LLM call for final synthesis
+                # Make ONE MORE LLM call for final synthesis (original code line 2220-2226)
                 final_result = self.current_client.create_completion(
                     messages=messages,
                     tools=None,  # No tools for final synthesis
@@ -606,15 +616,23 @@ Continue with the next step of your plan."""
                         logger.info("Forced synthesis produced <answer> tags")
                         print(f"[DEBUG] ✅ Forced synthesis produced answer")
                     else:
-                        # Use the whole response as answer
+                        # Use the whole response as answer (original behavior)
                         final_response = final_content
                         logger.info("Forced synthesis did not produce <answer> tags, using full response")
                         print(f"[DEBUG] Using full forced response as answer")
                     
-                    all_thinking.append(f"**Forced Final Synthesis:**\n{final_content[:1000]}...")
+                    all_thinking.append(f"**Forced Final Synthesis:**\n{final_content[:1500]}...")
                     iteration += 1  # Count this as an iteration
                 else:
                     final_response = f"Failed to generate final synthesis: {final_result.get('error')}"
+            
+            # If still no final_response, use the last assistant message
+            if not final_response and last_assistant_content:
+                # Extract answer if present, otherwise use full content
+                extracted = extract_answer(last_assistant_content)
+                final_response = extracted if extracted else last_assistant_content
+                logger.info("Using last assistant message as final response")
+                print(f"[DEBUG] Using last assistant message as final response")
             
             # Finalize stats
             stats["execution_time"] = round(time.time() - start_time, 2)
