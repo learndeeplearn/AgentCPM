@@ -1175,6 +1175,7 @@ Wrap final answer in <answer>...</answer> tags.""",
                     )
                     with gr.Column(scale=1):
                         submit_btn = gr.Button("🚀 Send", variant="primary", size="lg")
+                        stop_btn = gr.Button("⏹️ Stop", variant="stop", size="lg")
                         clear_btn = gr.Button("🗑️ Clear", variant="secondary")
                 
                 # Status display
@@ -1274,7 +1275,8 @@ Wrap final answer in <answer>...</answer> tags.""",
             )
         
         # Connect events - include state in inputs/outputs for persistence
-        submit_btn.click(
+        # Store click events so we can cancel them
+        submit_click_event = submit_btn.click(
             fn=process_wrapper,
             inputs=[
                 prompt_input, model_input, base_url_input,
@@ -1288,7 +1290,7 @@ Wrap final answer in <answer>...</answer> tags.""",
             outputs=[output_display, status_display, last_output_state, last_status_state]  # Update state
         )
         
-        prompt_input.submit(
+        submit_enter_event = prompt_input.submit(
             fn=process_wrapper,
             inputs=[
                 prompt_input, model_input, base_url_input,
@@ -1300,6 +1302,18 @@ Wrap final answer in <answer>...</answer> tags.""",
                 last_output_state, last_status_state  # Include state as input
             ],
             outputs=[output_display, status_display, last_output_state, last_status_state]  # Update state
+        )
+        
+        # Stop button cancels running processes
+        def on_stop():
+            """Handle stop button - update status."""
+            return "⏹️ Stopped by user"
+        
+        stop_btn.click(
+            fn=on_stop,
+            inputs=[],
+            outputs=[status_display],
+            cancels=[submit_click_event, submit_enter_event]  # Cancel running events
         )
         
         init_mcp_btn.click(
