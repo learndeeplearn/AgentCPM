@@ -1192,14 +1192,31 @@ Wrap final answer in <answer>...</answer> tags.""",
                     height=500
                 )
         
+        # State components to persist data across refreshes
+        # Note: gr.State stores data server-side per session
+        last_output_state = gr.State(value="*Click Send to start processing...*")
+        last_status_state = gr.State(value="Ready")
+        
+        # Restore state on page load
+        def restore_state(last_output, last_status):
+            """Restore previous state on page load/refresh."""
+            return last_output, last_status
+        
+        demo.load(
+            fn=restore_state,
+            inputs=[last_output_state, last_status_state],
+            outputs=[output_display, status_display]
+        )
+        
         # Event handlers
         def process_wrapper(prompt, model, base_url, temp, max_tok, max_iter, max_no_op, 
                            return_thought, use_browser_proc, use_ctx_mgr, max_ctx_tokens,
                            sys_prompt, mgr_url, use_web_search, use_fetch_webpage,
-                           log_raw, log_tools, log_errors, log_debug):
-            """Wrapper to handle the generator output."""
+                           log_raw, log_tools, log_errors, log_debug,
+                           last_output, last_status):
+            """Wrapper to handle the generator output and save state."""
             if not prompt.strip():
-                yield ("*Please enter a prompt*", "⚠️ Please enter a prompt")
+                yield ("*Please enter a prompt*", "⚠️ Please enter a prompt", last_output, last_status)
                 return
             
             # Pack logging settings
@@ -1219,6 +1236,9 @@ Wrap final answer in <answer>...</answer> tags.""",
             # Check if any tools are enabled
             use_tools = use_web_search or use_fetch_webpage
             
+            current_output = last_output
+            current_status = last_status
+            
             for result in agent.process_prompt(
                 prompt, model, base_url, temp, max_tok, sys_prompt, mgr_url, use_tools, 
                 int(max_iter), int(max_no_op), return_thought,
@@ -1226,7 +1246,11 @@ Wrap final answer in <answer>...</answer> tags.""",
                 log_settings=log_settings,
                 enabled_tools=enabled_tools
             ):
-                yield result
+                output, status = result
+                current_output = output
+                current_status = status
+                # Yield: output, status, updated_output_state, updated_status_state
+                yield (output, status, current_output, current_status)
         
         async def init_tools_wrapper(manager_url):
             """Wrapper for tools initialization."""
@@ -1239,13 +1263,17 @@ Wrap final answer in <answer>...</answer> tags.""",
             # Reset the client so new settings take effect
             agent.current_client = None
             agent.tool_handler = None
+            default_output = "*Click Send to start processing...*"
+            default_status = "Ready"
             return (
                 default_prompt,  # Reset to default prompt
-                "*Click Send to start processing...*",
-                "Ready"
+                default_output,
+                default_status,
+                default_output,  # Also reset state
+                default_status   # Also reset state
             )
         
-        # Connect events
+        # Connect events - include state in inputs/outputs for persistence
         submit_btn.click(
             fn=process_wrapper,
             inputs=[
@@ -1254,9 +1282,10 @@ Wrap final answer in <answer>...</answer> tags.""",
                 consecutive_no_op_slider, return_thought_checkbox,
                 use_browser_processor_checkbox, use_context_manager_checkbox, max_context_tokens_slider,
                 system_prompt_input, manager_url_input, web_search_checkbox, fetch_webpage_checkbox,
-                log_raw_output_checkbox, log_tool_calls_checkbox, log_errors_checkbox, log_debug_checkbox
+                log_raw_output_checkbox, log_tool_calls_checkbox, log_errors_checkbox, log_debug_checkbox,
+                last_output_state, last_status_state  # Include state as input
             ],
-            outputs=[output_display, status_display]
+            outputs=[output_display, status_display, last_output_state, last_status_state]  # Update state
         )
         
         prompt_input.submit(
@@ -1267,9 +1296,10 @@ Wrap final answer in <answer>...</answer> tags.""",
                 consecutive_no_op_slider, return_thought_checkbox,
                 use_browser_processor_checkbox, use_context_manager_checkbox, max_context_tokens_slider,
                 system_prompt_input, manager_url_input, web_search_checkbox, fetch_webpage_checkbox,
-                log_raw_output_checkbox, log_tool_calls_checkbox, log_errors_checkbox, log_debug_checkbox
+                log_raw_output_checkbox, log_tool_calls_checkbox, log_errors_checkbox, log_debug_checkbox,
+                last_output_state, last_status_state  # Include state as input
             ],
-            outputs=[output_display, status_display]
+            outputs=[output_display, status_display, last_output_state, last_status_state]  # Update state
         )
         
         init_mcp_btn.click(
@@ -1281,7 +1311,7 @@ Wrap final answer in <answer>...</answer> tags.""",
         clear_btn.click(
             fn=clear_wrapper,
             inputs=[],
-            outputs=[prompt_input, output_display, status_display]
+            outputs=[prompt_input, output_display, status_display, last_output_state, last_status_state]
         )
     
     return demo
