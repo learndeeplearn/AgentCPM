@@ -203,7 +203,8 @@ class AgentGUI:
         use_browser_processor: bool = False,
         use_context_manager: bool = False,
         max_context_tokens: int = 15000,
-        log_settings: dict = None
+        log_settings: dict = None,
+        enabled_tools: dict = None
     ) -> Generator[tuple, None, None]:
         """
         Process a user prompt and yield step-by-step updates.
@@ -297,6 +298,10 @@ class AgentGUI:
         
         # Get tools if enabled
         tools = None
+        # Default enabled_tools if not specified
+        if enabled_tools is None:
+            enabled_tools = {"web_search": True, "fetch_webpage": True}
+        
         if use_tools:
             # Initialize tools if not already done
             if not self.tool_handler:
@@ -319,11 +324,20 @@ class AgentGUI:
                     yield (build_output(input_text=input_text, logs_text=logs_text, status_text=current_status), current_status)
             
             if self.tool_handler:
-                tools = self.tool_handler.openai_tools
-                tool_names = [t["function"]["name"] for t in tools]
-                input_text += f"\n**Available tools:** {', '.join(tool_names)}"
-                current_status = f"🔧 {len(tools)} tools available"
-                yield (build_output(input_text=input_text, status_text=current_status), current_status)
+                # Filter tools based on enabled_tools checkboxes
+                all_tools = self.tool_handler.openai_tools
+                tools = [t for t in all_tools if t["function"]["name"] in enabled_tools and enabled_tools.get(t["function"]["name"], False)]
+                
+                if tools:
+                    tool_names = [t["function"]["name"] for t in tools]
+                    input_text += f"\n**Enabled tools:** {', '.join(tool_names)}"
+                    current_status = f"🔧 {len(tools)} tools enabled"
+                    yield (build_output(input_text=input_text, status_text=current_status), current_status)
+                else:
+                    input_text += f"\n**Tools:** No tools enabled"
+                    current_status = "⚠️ No tools enabled"
+                    yield (build_output(input_text=input_text, status_text=current_status), current_status)
+                    tools = None  # No tools to use
         
         # Agent loop - iterate until <answer> tags found or max iterations
         import time
@@ -502,9 +516,14 @@ class AgentGUI:
                         func_name = tool_call.get("function", {}).get("name", "unknown")
                         func_args_str = tool_call.get("function", {}).get("arguments", "{}")
                         
-                        # Skip invalid tool names
+                        # Skip invalid or disabled tool names
                         if func_name not in ["web_search", "fetch_webpage"]:
                             logger.warning(f"Skipping invalid tool: {func_name}")
+                            continue
+                        
+                        if not enabled_tools.get(func_name, False):
+                            logger.warning(f"Skipping disabled tool: {func_name}")
+                            iteration_tools.append(f"**Tool:** `{func_name}` (DISABLED - skipped)")
                             continue
                         
                         tool_entry = f"**Tool:** `{func_name}`\n```json\n{func_args_str}\n```"
@@ -849,10 +868,20 @@ def create_gui() -> gr.Blocks:
                         value="http://localhost:8000/mcpapi",
                         placeholder="MCP Manager API URL (leave default for simple tools)"
                     )
-                    use_tools_checkbox = gr.Checkbox(
-                        label="Enable Tools (web_search, fetch_webpage)",
-                        value=True
-                    )
+                    gr.Markdown("**Built-in Tools** (select which to enable):")
+                    
+                    with gr.Row():
+                        web_search_checkbox = gr.Checkbox(
+                            label="🔍 web_search",
+                            value=True,
+                            info="Search the web using DuckDuckGo"
+                        )
+                        fetch_webpage_checkbox = gr.Checkbox(
+                            label="🌐 fetch_webpage",
+                            value=True,
+                            info="Fetch and extract content from URLs"
+                        )
+                    
                     init_mcp_btn = gr.Button("🔧 Initialize Tools", variant="secondary")
                     mcp_status = gr.Textbox(
                         label="Tools Status",
@@ -860,11 +889,7 @@ def create_gui() -> gr.Blocks:
                         interactive=False
                     )
                     gr.Markdown("""
-                    **Built-in Tools** (always available):
-                    - 🔍 **web_search** - Search the web using DuckDuckGo
-                    - 🌐 **fetch_webpage** - Fetch and extract content from URLs
-                    
-                    *Tools are initialized automatically when you send a message with "Enable Tools" checked.*
+                    *Tools are initialized automatically when you send a message with any tool enabled.*
                     """)
                 
                 with gr.Accordion("Agent Settings (Original Flags)", open=True):
@@ -1083,7 +1108,7 @@ Wrap final answer in <answer>...</answer> tags.""",
         # Event handlers
         def process_wrapper(prompt, model, base_url, temp, max_tok, max_iter, max_no_op, 
                            return_thought, use_browser_proc, use_ctx_mgr, max_ctx_tokens,
-                           sys_prompt, mgr_url, use_tools,
+                           sys_prompt, mgr_url, use_web_search, use_fetch_webpage,
                            log_raw, log_tools, log_errors, log_debug):
             """Wrapper to handle the generator output."""
             if not prompt.strip():
@@ -1098,11 +1123,21 @@ Wrap final answer in <answer>...</answer> tags.""",
                 "debug": log_debug
             }
             
+            # Pack enabled tools
+            enabled_tools = {
+                "web_search": use_web_search,
+                "fetch_webpage": use_fetch_webpage
+            }
+            
+            # Check if any tools are enabled
+            use_tools = use_web_search or use_fetch_webpage
+            
             for result in agent.process_prompt(
                 prompt, model, base_url, temp, max_tok, sys_prompt, mgr_url, use_tools, 
                 int(max_iter), int(max_no_op), return_thought,
                 use_browser_proc, use_ctx_mgr, int(max_ctx_tokens),
-                log_settings=log_settings
+                log_settings=log_settings,
+                enabled_tools=enabled_tools
             ):
                 yield result
         
@@ -1131,7 +1166,7 @@ Wrap final answer in <answer>...</answer> tags.""",
                 temperature_slider, max_tokens_slider, max_iterations_slider,
                 consecutive_no_op_slider, return_thought_checkbox,
                 use_browser_processor_checkbox, use_context_manager_checkbox, max_context_tokens_slider,
-                system_prompt_input, manager_url_input, use_tools_checkbox,
+                system_prompt_input, manager_url_input, web_search_checkbox, fetch_webpage_checkbox,
                 log_raw_output_checkbox, log_tool_calls_checkbox, log_errors_checkbox, log_debug_checkbox
             ],
             outputs=[output_display, status_display]
@@ -1144,7 +1179,7 @@ Wrap final answer in <answer>...</answer> tags.""",
                 temperature_slider, max_tokens_slider, max_iterations_slider,
                 consecutive_no_op_slider, return_thought_checkbox,
                 use_browser_processor_checkbox, use_context_manager_checkbox, max_context_tokens_slider,
-                system_prompt_input, manager_url_input, use_tools_checkbox,
+                system_prompt_input, manager_url_input, web_search_checkbox, fetch_webpage_checkbox,
                 log_raw_output_checkbox, log_tool_calls_checkbox, log_errors_checkbox, log_debug_checkbox
             ],
             outputs=[output_display, status_display]
