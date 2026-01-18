@@ -415,7 +415,12 @@ class AgentGUI:
                 tool_calls = result.get("tool_calls", [])
                 
                 if tool_calls and self.tool_handler:
-                    consecutive_no_tool = 0  # Reset counter
+                    # Original code (line 1785): reset consecutive_no_op_count = 0
+                    consecutive_no_tool = 0
+                    
+                    # Original code (line 1786): add assistant message ONCE before tool loop
+                    messages.append({"role": "assistant", "content": raw_response})
+                    
                     iteration_tools = []
                     
                     for i, tool_call in enumerate(tool_calls):
@@ -453,20 +458,10 @@ class AgentGUI:
                             
                             iteration_tools.append(f"**Result:**\n```\n{result_str}\n```")
                             
-                            # Add tool result to messages for next iteration
-                            messages.append({"role": "assistant", "content": raw_response})
+                            # Original format (lines 2152-2154): <tool_response>...</tool_response>
                             messages.append({
                                 "role": "user", 
-                                "content": f"""Tool '{func_name}' returned the following results:
-
-{result_str}
-
-Based on these results:
-1. Extract key information relevant to the task
-2. Determine if you need more information (use another tool call)
-3. If you have gathered enough information, provide your final answer wrapped in <answer>YOUR ANSWER</answer> tags
-
-Continue with the next step of your plan."""
+                                "content": f"<tool_response>\n{result_str}\n</tool_response>"
                             })
                             
                             current_status = f"✅ Step {iteration}: {func_name} completed"
@@ -484,11 +479,14 @@ Continue with the next step of your plan."""
                         except Exception as e:
                             error_str = str(e)
                             iteration_tools.append(f"**Error:** {error_str}")
-                            messages.append({"role": "assistant", "content": raw_response})
+                            
+                            # Original format for error (lines 2122-2124)
+                            error_content = json.dumps({"error": error_str})
                             messages.append({
                                 "role": "user",
-                                "content": f"Tool '{func_name}' failed with error: {error_str}\n\nPlease try a different approach or search query."
+                                "content": f"<tool_response>\n{error_content}\n</tool_response>"
                             })
+                            
                             current_status = f"⚠️ Step {iteration}: {func_name} failed"
                             all_steps.append(f"Step {iteration}: ❌ {func_name} failed: {error_str[:50]}")
                             
