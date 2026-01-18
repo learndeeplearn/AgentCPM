@@ -213,14 +213,45 @@ class AgentGUI:
         """
         self.step_counter = 1
         output_parts = []
-        logs_accumulated = []
-        raw_output_logs = []  # Store raw output in JSON format like original code
         
         # Default log settings
         if log_settings is None:
             log_settings = {"raw_output": True, "tool_calls": True, "errors": True, "debug": False}
         
-        def build_output(input_text="", thinking_text="", tool_calls_text="", response_text="", logs_text="", status_text="", raw_output_text=""):
+        # Structured log storage - each entry has level and content
+        all_logs = []  # List of {"level": "INFO|RAW|TOOL|ERROR|DEBUG", "content": "..."}
+        
+        def add_log(level: str, content: str):
+            """Add a log entry with level prefix."""
+            all_logs.append({"level": level, "content": content})
+        
+        def get_filtered_logs():
+            """Get logs filtered by current log_settings."""
+            filtered = []
+            for log in all_logs:
+                level = log["level"]
+                content = log["content"]
+                
+                # Check if this level is enabled
+                show = False
+                if level == "RAW" and log_settings.get("raw_output"):
+                    show = True
+                elif level == "TOOL" and log_settings.get("tool_calls"):
+                    show = True
+                elif level == "ERROR" and log_settings.get("errors"):
+                    show = True
+                elif level == "DEBUG" and log_settings.get("debug"):
+                    show = True
+                elif level == "INFO":  # Always show INFO
+                    show = True
+                
+                if show:
+                    # Format with level prefix
+                    filtered.append(f"[{level}] {content}")
+            
+            return "\n".join(filtered)
+        
+        def build_output(input_text="", thinking_text="", tool_calls_text="", response_text="", status_text=""):
             """Build combined output from all sections."""
             sections = []
             
@@ -240,28 +271,20 @@ class AgentGUI:
             if response_text:
                 sections.append(f"### 💬 FINAL RESPONSE\n\n{response_text}")
             
-            # Raw output section (like original code format)
-            if raw_output_text:
-                sections.append(f"### 📄 RAW OUTPUT (Original Format)\n\n{raw_output_text}")
-            
+            # LOGS section - filtered by log_settings
+            logs_text = get_filtered_logs()
             if logs_text:
                 sections.append(f"### 📋 LOGS\n\n```\n{logs_text}\n```")
             
             return "\n\n---\n\n".join(sections) if sections else "*Processing...*"
         
-        # Collect logs
-        def collect_logs():
-            logs = get_logs()
-            if logs:
-                logs_accumulated.append(logs)
-            return "\n".join(logs_accumulated)
-        
         input_text = f"**User Prompt:**\n```\n{prompt}\n```"
         thinking_text = ""
         tool_calls_text = ""
         response_text = ""
-        logs_text = ""
         current_status = "🔄 Processing input..."
+        
+        add_log("INFO", f"Processing prompt: {prompt[:100]}...")
         
         # Step 1: Input received
         yield (build_output(input_text=input_text, status_text=current_status), current_status)
@@ -269,16 +292,17 @@ class AgentGUI:
         # Initialize client if needed
         if not self.current_client:
             current_status = "🔄 Initializing LLM client..."
+            add_log("INFO", f"Initializing LLM client: {model} @ {base_url}")
             yield (build_output(input_text=input_text, status_text=current_status), current_status)
             
             init_result = self.initialize_client(model, base_url)
-            logs_text = collect_logs()
             if "❌" in init_result:
-                logs_text += f"\n{init_result}"
-                yield (build_output(input_text=input_text, logs_text=logs_text, status_text=init_result), init_result)
+                add_log("ERROR", f"Client initialization failed: {init_result}")
+                yield (build_output(input_text=input_text, status_text=init_result), init_result)
                 return
+            add_log("INFO", "Client initialized successfully")
             current_status = "✅ Client initialized"
-            yield (build_output(input_text=input_text, logs_text=logs_text, status_text=current_status), current_status)
+            yield (build_output(input_text=input_text, status_text=current_status), current_status)
         
         # Build messages
         messages = []
@@ -313,15 +337,16 @@ class AgentGUI:
                 init_result = loop.run_until_complete(self.initialize_tools(use_mcp=True, manager_url=manager_url))
                 loop.close()
                 
-                logs_text = collect_logs()
                 if "❌" in init_result:
+                    add_log("ERROR", f"Tool initialization failed: {init_result}")
                     input_text += f"\n**Tools:** {init_result}"
                     current_status = init_result
-                    yield (build_output(input_text=input_text, logs_text=logs_text, status_text=current_status), current_status)
+                    yield (build_output(input_text=input_text, status_text=current_status), current_status)
                 else:
+                    add_log("INFO", f"Tools initialized: {init_result}")
                     input_text += f"\n**Tools:** {init_result}"
                     current_status = init_result
-                    yield (build_output(input_text=input_text, logs_text=logs_text, status_text=current_status), current_status)
+                    yield (build_output(input_text=input_text, status_text=current_status), current_status)
             
             if self.tool_handler:
                 # Filter tools based on enabled_tools checkboxes
@@ -414,16 +439,15 @@ class AgentGUI:
                     temperature=temperature,
                     max_tokens=max_tokens if max_tokens > 0 else None
                 )
-                print(f"[DEBUG] LLM response received")
-                
-                logs_text = collect_logs()
+                add_log("DEBUG", f"LLM response received for step {iteration}")
                 
                 # Check for errors
                 if result.get("error"):
+                    add_log("ERROR", f"LLM Error at step {iteration}: {result['error']}")
                     current_status = f"❌ LLM Error: {result['error']}"
                     yield (build_output(input_text=input_text, thinking_text="\n\n".join(all_thinking),
                                        tool_calls_text="\n\n---\n\n".join(all_tool_calls), 
-                                       logs_text=logs_text, status_text=current_status), current_status)
+                                       status_text=current_status), current_status)
                     break
                 
                 # Process thinking/reasoning
@@ -434,20 +458,22 @@ class AgentGUI:
                 raw_response = result.get("response", "")
                 tool_calls = result.get("tool_calls", None)
                 
-                # Log raw output in original format (like data_test_copy.py)
-                if log_settings.get("raw_output"):
-                    raw_message = {
-                        "role": "assistant",
-                        "content": raw_response
-                    }
-                    if thinking_text:
-                        raw_message["thought"] = thinking_text
-                    if tool_calls:
-                        raw_message["tool_calls"] = tool_calls
-                    
-                    # Format as JSON like original code output
-                    raw_json = json.dumps(raw_message, indent=2, ensure_ascii=False)
-                    raw_output_logs.append(f"**Step {iteration} Response:**\n```json\n{raw_json}\n```")
+                # Log raw output in original format (like data_test_copy.py) - FULL content, no truncation
+                raw_message = {
+                    "role": "assistant",
+                    "content": raw_response
+                }
+                if thinking_text:
+                    raw_message["thought"] = thinking_text
+                if tool_calls:
+                    raw_message["tool_calls"] = tool_calls
+                
+                # Format as JSON like original code output - FULL RAW OUTPUT
+                raw_json = json.dumps(raw_message, indent=2, ensure_ascii=False)
+                add_log("RAW", f"Step {iteration} model response:\n{raw_json}")
+                
+                # Debug log
+                add_log("DEBUG", f"Step {iteration}: response length={len(raw_response)}, has_tool_calls={tool_calls is not None}")
                 
                 # Log this step - ORIGINAL FORMAT: Show full raw response (not extracted thinking)
                 # Original code shows: "Thinking...\n[reasoning]\n...done thinking.\n\n[response]"
@@ -458,19 +484,12 @@ class AgentGUI:
                 if raw_response:
                     all_thinking.append(f"{step_info}\n{raw_response}")
                     current_status = f"🧠 Step {iteration}: Model responding..."
-                    raw_output_text = "\n\n".join(raw_output_logs) if log_settings.get("raw_output") else ""
                     yield (build_output(input_text=input_text, thinking_text="\n\n".join(all_thinking), 
-                                       logs_text=logs_text, status_text=current_status,
-                                       raw_output_text=raw_output_text), current_status)
+                                       status_text=current_status), current_status)
                 
                 # Check for final answer in response
                 final_answer = extract_answer(raw_response)
-                
-                # Debug: Show first 500 chars of raw response
-                logger.info(f"Step {iteration} raw response (first 500 chars): {raw_response[:500]}")
-                logger.info(f"Step {iteration} has <answer> tags: {final_answer is not None}")
-                print(f"[DEBUG] Step {iteration}: response length={len(raw_response)}, has_answer={final_answer is not None}")
-                print(f"[DEBUG] Step {iteration} response preview: {raw_response[:300]}...")
+                add_log("DEBUG", f"Step {iteration} has <answer> tags: {final_answer is not None}")
                 
                 if final_answer:
                     # Original logic: if <answer> found, we're done
@@ -486,13 +505,12 @@ class AgentGUI:
                     self.conversation_history.append({"role": "assistant", "content": raw_response})
                     
                     # Yield immediately to show final answer (before breaking)
+                    add_log("INFO", f"Final answer found at step {iteration}")
                     current_status = f"✅ Final answer found at step {iteration}"
-                    raw_output_text = "\n\n".join(raw_output_logs) if log_settings.get("raw_output") else ""
                     yield (build_output(input_text=input_text, thinking_text="\n\n".join(all_thinking),
                                        tool_calls_text="\n\n---\n\n".join(all_tool_calls),
                                        response_text=final_response,
-                                       logs_text=logs_text, status_text=current_status,
-                                       raw_output_text=raw_output_text), current_status)
+                                       status_text=current_status), current_status)
                     break
                 
                 # Track usage/tokens
@@ -530,10 +548,13 @@ class AgentGUI:
                         iteration_tools.append(tool_entry)
                         all_steps.append(f"Step {iteration}: 🔧 Calling {func_name}")
                         
+                        # Log tool call request
+                        add_log("TOOL", f"Step {iteration} calling {func_name} with args:\n{func_args_str}")
+                        
                         current_status = f"🔧 Step {iteration}: Executing {func_name}..."
                         yield (build_output(input_text=input_text, thinking_text="\n\n".join(all_thinking), 
                                            tool_calls_text="\n\n---\n\n".join(all_tool_calls + [f"**Step {iteration}:**\n" + "\n".join(iteration_tools)]),
-                                           logs_text=logs_text, status_text=current_status), current_status)
+                                           status_text=current_status), current_status)
                         
                         # Execute tool
                         try:
@@ -546,6 +567,9 @@ class AgentGUI:
                             loop.close()
                             
                             result_str = json.dumps(tool_result, indent=2, ensure_ascii=False)
+                            
+                            # Log tool result (full, no truncation)
+                            add_log("TOOL", f"Step {iteration} {func_name} result:\n{result_str}")
                             
                             # USE_BROWSER_PROCESSOR: Summarize long web content (original lines 2030-2097)
                             if use_browser_processor and func_name in ["fetch_webpage", "web_search"]:
@@ -593,6 +617,9 @@ class AgentGUI:
                             error_str = str(e)
                             iteration_tools.append(f"**Error:** {error_str}")
                             
+                            # Log tool error
+                            add_log("ERROR", f"Step {iteration} {func_name} failed: {error_str}")
+                            
                             # Original format for error (lines 2122-2124)
                             error_content = json.dumps({"error": error_str})
                             messages.append({
@@ -613,10 +640,9 @@ class AgentGUI:
                             })
                             stats["total_tool_calls"] += 1
                         
-                        logs_text = collect_logs()
                         yield (build_output(input_text=input_text, thinking_text="\n\n".join(all_thinking), 
                                            tool_calls_text="\n\n---\n\n".join(all_tool_calls + [f"**Step {iteration}:**\n" + "\n".join(iteration_tools)]),
-                                           logs_text=logs_text, status_text=current_status), current_status)
+                                           status_text=current_status), current_status)
                     
                     if iteration_tools:
                         all_tool_calls.append(f"**Step {iteration}:**\n" + "\n".join(iteration_tools))
@@ -639,7 +665,7 @@ class AgentGUI:
                 current_status = f"🧠 Step {iteration}: Model reasoning... ({consecutive_no_tool}/{MAX_NO_TOOL} before force)"
                 yield (build_output(input_text=input_text, thinking_text="\n\n".join(all_thinking),
                                    tool_calls_text="\n\n---\n\n".join(all_tool_calls),
-                                   logs_text=logs_text, status_text=current_status), current_status)
+                                   status_text=current_status), current_status)
                 
                 # Add assistant response to history
                 # Original: if return_thought, wrap thinking in <think> tags (lines 1593-1595)
@@ -677,13 +703,13 @@ class AgentGUI:
                     current_status = f"⚠️ Step {iteration}: Force prompt inserted, continuing..."
                     yield (build_output(input_text=input_text, thinking_text="\n\n".join(all_thinking),
                                        tool_calls_text="\n\n---\n\n".join(all_tool_calls),
-                                       logs_text=logs_text, status_text=current_status), current_status)
+                                       status_text=current_status), current_status)
                 
                 # Continue to next iteration (original always continues here)
                 continue
             
             # Loop ended - check if we need forced final answer (like original code)
-            logs_text = collect_logs()
+            add_log("INFO", f"Agent loop ended at iteration {iteration}")
             max_iterations_reached = (iteration >= max_iterations)
             
             # Check if we have an answer from the last message
@@ -704,7 +730,7 @@ class AgentGUI:
                 current_status = f"⚠️ Max iterations reached - Forcing final answer..."
                 yield (build_output(input_text=input_text, thinking_text="\n\n".join(all_thinking),
                                    tool_calls_text="\n\n---\n\n".join(all_tool_calls),
-                                   logs_text=logs_text, status_text=current_status), current_status)
+                                   status_text=current_status), current_status)
                 
                 # Add force answer prompt (exactly like original code line 2188-2194)
                 force_answer_prompt = (
@@ -794,26 +820,20 @@ class AgentGUI:
             else:
                 status = f"✅ Complete ({iteration} step{'s' if iteration > 1 else ''}) | {stats['execution_time']}s | {stats['total_tool_calls']} tool calls"
             
-            print(f"[DEBUG] Yielding final output with status: {status}")
-            raw_output_text = "\n\n".join(raw_output_logs) if log_settings.get("raw_output") else ""
+            add_log("INFO", f"Completed: {status}")
             yield (build_output(input_text=input_text, thinking_text="\n\n".join(all_thinking),
                                tool_calls_text="\n\n---\n\n".join(all_tool_calls), 
                                response_text=final_response,
-                               logs_text=logs_text, status_text=status,
-                               raw_output_text=raw_output_text), status)
-            print(f"[DEBUG] Final output yielded successfully")
+                               status_text=status), status)
             
         except Exception as e:
             error_msg = f"Error during agent loop: {str(e)}"
             logger.error(error_msg, exc_info=True)
-            logs_text = collect_logs()
-            logs_text += f"\n\n**Exception:** {error_msg}"
+            add_log("ERROR", f"Exception: {error_msg}")
             current_status = f"❌ Error: {error_msg[:80]}"
-            raw_output_text = "\n\n".join(raw_output_logs) if log_settings.get("raw_output") else ""
             yield (build_output(input_text=input_text, thinking_text="\n\n".join(all_thinking),
                                tool_calls_text="\n\n---\n\n".join(all_tool_calls), 
-                               logs_text=logs_text, status_text=current_status,
-                               raw_output_text=raw_output_text), current_status)
+                               status_text=current_status), current_status)
 
 
 def create_gui() -> gr.Blocks:
