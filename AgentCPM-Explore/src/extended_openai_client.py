@@ -303,18 +303,38 @@ class ExtendedOpenAIClient(BaseLLMClient):
                 final_tool_calls = [tool_deltas[k] for k in sorted(tool_deltas.keys())]
                 final_reasoning = "".join(reasoning_content_parts)
 
-                # ORIGINAL CODE BEHAVIOR: Do NOT extract <think> tags from content
-                # Keep the full response including "Thinking..." or <think> tags in content
-                # Only use reasoning_content from API if explicitly provided (DeepSeek API)
-                # The _parse_think_from_text was extracting and REMOVING thinking from content
-                # which differs from original data_test_copy.py behavior
+                # CONVERT TO ORIGINAL "Thinking...done thinking" FORMAT
+                # The original code output shows: "Thinking...\n[reasoning]\n...done thinking.\n\n[response]"
+                # DeepSeek models may output in different formats:
+                # 1. Via reasoning_content API field (final_reasoning)
+                # 2. Via <think>...</think> tags in content
+                # 3. Via </think> tag in content (when <think> was in reasoning_content)
                 
-                # If we have reasoning from API streaming (reasoning_content field), 
-                # prepend it to content in "Thinking...done thinking" format for consistency
+                # Case 1: Reasoning from API field - prepend to content
                 if final_reasoning and not final_content.startswith("Thinking"):
-                    # Format like original: "Thinking...\n{reasoning}\n...done thinking.\n\n{content}"
                     final_content = f"Thinking...\n{final_reasoning}\n...done thinking.\n\n{final_content}"
-                    final_reasoning = ""  # Clear since it's now in content
+                    final_reasoning = ""
+                
+                # Case 2: <think>...</think> tags in content - convert to "Thinking...done thinking" format
+                if "<think>" in final_content and "</think>" in final_content:
+                    think_match = re.search(r'<think>(.*?)</think>', final_content, re.DOTALL)
+                    if think_match:
+                        thinking_content = think_match.group(1).strip()
+                        rest_content = final_content.replace(think_match.group(0), "").strip()
+                        final_content = f"Thinking...\n{thinking_content}\n...done thinking.\n\n{rest_content}"
+                
+                # Case 3: Only </think> in content (opening was in reasoning_content) - clean it up
+                elif "</think>" in final_content and "<think>" not in final_content:
+                    # The </think> is a leftover, content before it is thinking, after is response
+                    parts = final_content.split("</think>", 1)
+                    if len(parts) == 2:
+                        thinking_part = parts[0].strip()
+                        response_part = parts[1].strip()
+                        if thinking_part and not final_content.startswith("Thinking"):
+                            final_content = f"Thinking...\n{thinking_part}\n...done thinking.\n\n{response_part}"
+                        else:
+                            # Just remove the </think> tag
+                            final_content = final_content.replace("</think>", "...done thinking.\n\n")
 
                 if not final_tool_calls:
                     parsed_result = self._parse_tool_calls_from_text(final_content)
